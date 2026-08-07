@@ -19,15 +19,24 @@ pub struct FeeQuote {
     pub tip: u128,
 }
 
-/// Fetches an initial quote and keeps refreshing it every 30s. With a fee
-/// currency the quote comes from Celo's parameterized gas price RPCs.
+/// How often the shared quote is refetched.
+///
+/// This has to keep up with a rising base fee, not just drift: EIP-1559 lets
+/// the base fee climb 12.5% per block, so saturating a fast chain can double it
+/// within a few seconds. Since the cap only leaves room for one doubling, a
+/// quote older than a couple of blocks starts getting transactions rejected as
+/// underpriced. One RPC every couple of seconds is a cheap price for tracking.
+const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Fetches an initial quote and keeps it fresh. With a fee currency the quote
+/// comes from Celo's parameterized gas price RPCs.
 pub async fn spawn_refresher(
     provider: DynProvider<Celo>,
     fee_currency: Option<Address>,
 ) -> Result<watch::Receiver<FeeQuote>> {
     let (tx, rx) = watch::channel(quote(&provider, fee_currency).await?);
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_secs(30));
+        let mut tick = tokio::time::interval(REFRESH_INTERVAL);
         tick.tick().await; // the first tick fires immediately; skip it
         loop {
             tick.tick().await;

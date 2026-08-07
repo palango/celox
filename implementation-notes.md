@@ -153,14 +153,34 @@ rejected with "max fee per gas less than block base fee" (100 rejections, one
 per sender) and the 930 already-pending transactions were stranded below the
 base fee until they timed out. Run collapsed to 0 tps: 2035/2965 confirmed.
 
-Fix not yet applied (Paul asked a question, not for a change). Options, in
-order of preference: refresh the quote every ~2s instead of 30s (a 2x cap
-absorbs 12.5%/block growth if re-quoted every couple of blocks); optionally a
-`--fee-multiplier` for saturation runs, noting a bigger cap costs nothing in
-actual fees (EIP-1559 charges base+tip, not the cap) but does inflate the
-funding balance check, which matters on chains with a high floor like Celo
-mainnet's 200 gwei. Stranded *pending* transactions need replace-by-fee,
-still deferred.
+**Fixed**: `fees::REFRESH_INTERVAL` is 2s, not 30s. Same run afterwards: 0
+rejections (was 100), 4527 confirmed (was 2035), ~227 tps sustained instead of
+collapsing to 0. The remaining 1360 drops are honest — 300 offered tps against
+a chain that fits ~226 storage txs per block (30M gas ÷ 133k) — plus the
+in-flight backlog timing out during drain. Set `--tps` at or below the chain's
+capacity for a drop-free run.
+
+Still deferred: a transaction already *pending* when the base fee overtakes
+its cap needs replace-by-fee to recover. A `--fee-multiplier` would buy more
+headroom and costs nothing in real fees (EIP-1559 charges base+tip, never the
+cap), but it inflates the funder's balance check — which matters on chains
+with a high floor like Celo mainnet's 200 gwei. Not added without a need.
+
+### Prior art (checked 2026-08-07)
+
+celo-monorepo has **no** load-test contract — its load test (`packages/celotool`
+`geth simulate-client` + `helm-charts/load-test`) only does transfer / data
+(large zero-byte calldata) / mixed modes, no contract deploy. Same for
+celo-org/celo-loadtest and tx-overload. hardfork-testing's `Bench.sol` is a
+CPU burner with `view` functions and hardcoded iteration counts.
+
+Real prior art is ethpandaops/spamoor: `ERC20Bloater.bloatStorage(startSlot,
+numAddresses)` is nearly identical to our StateWriter (start + count over fresh
+mapping slots), which independently validates the design. Its
+`StorageSpam.setRandomForGas(gasLimit, txid)` takes the other approach —
+`while (gasleft() > gasLimit)` — which makes gas **exact** rather than an upper
+bound and lets a caller dial "N gas per transaction" directly. Worth
+considering if our 6% over-provisioning or block-packing fidelity ever matters.
 
 ### Lane abstraction (2026-08-07, Paul's idea)
 

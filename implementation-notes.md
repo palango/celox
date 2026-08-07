@@ -65,8 +65,13 @@ is abandoned and its repo is gone.
   it to stop); main backstops the drain with `receipt_timeout + 15s` and
   exits 1 instead of hanging CI; `--tps` capped at 10k (beyond that the
   refill interval rounds to zero and panicked inside the detached task).
-- Open with Paul: whether `--private-key` should remain a flag (argv/history
-  exposure; env var `CELOX_PRIVATE_KEY` is the safe route).
+- Paul decided (2026-08-07): root key comes from `CELOX_PRIVATE_KEY` only;
+  the `--private-key` flag is gone (argv leaks into history and ps).
+- Accepted stats-semantics quirks, same class as late-landing dropped txs:
+  a submission that *times out* (vs. is rejected) counts as Rejected though
+  the node may have accepted it; and when the drain deadline fires, the run
+  exits 1 without a summary — stuck senders hold event channels open, so the
+  reporter cannot finish (a snapshot channel would fix it if it ever bites).
 - Deferred: behavioral tests for sender/funder failure paths via alloy's
   mock-transport `Asserter` — proposed as standalone task, not milestone
   filler.

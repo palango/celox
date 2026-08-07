@@ -25,15 +25,15 @@ use crate::{
 
 /// Transaction load-testing tool for Celo chains.
 #[derive(Parser)]
-#[command(version, about)]
+#[command(
+    version,
+    about,
+    after_help = "The root account's private key is read from CELOX_PRIVATE_KEY."
+)]
 struct Args {
     /// JSON-RPC endpoint of the target chain
     #[arg(long, env = "ETH_RPC_URL", default_value = "http://127.0.0.1:8545")]
     rpc_url: String,
-
-    /// Private key of the funded root account
-    #[arg(long, env = "CELOX_PRIVATE_KEY", hide_env_values = true)]
-    private_key: String,
 
     /// Workload to generate
     #[arg(long, value_enum, default_value_t = WorkloadKind::Transfer)]
@@ -86,9 +86,18 @@ async fn main() -> Result<()> {
     );
     ensure!(args.senders > 0, "--senders must be at least 1");
     ensure!(args.window > 0, "--window must be at least 1");
+    // Beyond this, txpool per-tx size limits reject everything anyway.
+    ensure!(
+        args.data_size <= 128 * 1024,
+        "--data-size must be at most 131072 bytes"
+    );
     let target_balance = parse_ether(&args.fund)?;
 
-    let root_signer: PrivateKeySigner = args.private_key.parse()?;
+    // Env only, never argv: a key on the command line leaks into shell
+    // history and ps output.
+    let private_key = std::env::var("CELOX_PRIVATE_KEY")
+        .map_err(|_| eyre::eyre!("set CELOX_PRIVATE_KEY to the root account's private key"))?;
+    let root_signer: PrivateKeySigner = private_key.parse()?;
     let root_address = root_signer.address();
     let root = connect(&args.rpc_url, root_signer.clone()).await?;
     let chain_id = root.get_chain_id().await?;
@@ -166,9 +175,9 @@ async fn main() -> Result<()> {
     let _ = stop_tx.send(true);
 
     // Every sender RPC is individually bounded, so the drain finishes within
-    // one receipt timeout plus slack; the deadline is a backstop that turns a
+    // receipt_timeout + RPC_TIMEOUT; the deadline is a backstop that turns a
     // wedged shutdown into a failed run instead of a hung CI job.
-    let drain_deadline = args.receipt_timeout + Duration::from_secs(15);
+    let drain_deadline = args.receipt_timeout + sender::RPC_TIMEOUT + Duration::from_secs(5);
     let mut sender_failed = false;
     match tokio::time::timeout(drain_deadline, join_all(tasks)).await {
         Ok(results) => {

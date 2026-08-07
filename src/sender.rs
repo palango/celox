@@ -33,8 +33,10 @@ type ReceiptWait = BoxFuture<'static, (Duration, Option<bool>)>;
 
 /// Bound on every submission and nonce RPC. Without it a connection that
 /// accepts a request but never answers blocks the sender loop outside its
-/// `select!`, where the stop signal cannot reach it.
-const RPC_TIMEOUT: Duration = Duration::from_secs(10);
+/// `select!`, where the stop signal cannot reach it. Public because main's
+/// drain deadline must exceed `receipt_timeout + RPC_TIMEOUT`, the worst
+/// legitimate drain.
+pub const RPC_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// One spamming account: owns its key (via the provider's wallet), a local
 /// nonce counter, and a bounded window of in-flight transactions.

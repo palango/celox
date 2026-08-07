@@ -13,7 +13,7 @@ use alloy_primitives::Address;
 use alloy_provider::{DynProvider, Provider};
 use celo_alloy_network::{Celo, ReceiptResponse};
 use celo_alloy_rpc_types::CeloTransactionRequest;
-use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesOrdered};
+use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use tracing::{debug, warn};
 
 use crate::fees::FeeQuote;
@@ -24,9 +24,13 @@ use crate::fees::FeeQuote;
 /// `receipt_timeout + RPC_TIMEOUT`, the worst legitimate drain.
 pub const RPC_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Nodes cap pending transactions per account (reth: 16), so a lane's window
-/// cannot exceed it; this is the funder's default and the senders' upper bound.
+/// The per-account pending limit nodes typically enforce (reth: 16). It is a
+/// node policy rather than a protocol rule, so celox uses it as the funder's
+/// window and warns — rather than refuses — when a sender's window exceeds it.
 pub const MAX_WINDOW: usize = 16;
+
+/// How often to re-ask for a receipt after the watcher itself has errored.
+const RECEIPT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Receipt wait result: latency plus `Some(status)`, or `None` when no receipt
 /// arrived within the timeout.
@@ -47,7 +51,7 @@ pub struct Lane {
     nonce: u64,
     window: usize,
     receipt_timeout: Duration,
-    in_flight: FuturesOrdered<ReceiptWait>,
+    in_flight: FuturesUnordered<ReceiptWait>,
 }
 
 impl Lane {
@@ -65,7 +69,7 @@ impl Lane {
             nonce,
             window,
             receipt_timeout,
-            in_flight: FuturesOrdered::new(),
+            in_flight: FuturesUnordered::new(),
         })
     }
 
@@ -112,14 +116,22 @@ impl Lane {
         self.nonce += 1;
 
         let receipt_timeout = self.receipt_timeout;
-        self.in_flight.push_back(
+        let hash = *pending.tx_hash();
+        let provider = self.provider.clone();
+        self.in_flight.push(
             async move {
                 let status =
                     match tokio::time::timeout(receipt_timeout, pending.get_receipt()).await {
                         Ok(Ok(receipt)) => Some(receipt.status()),
+                        // A failing watcher says nothing about the transaction:
+                        // a flaky endpoint, or a load balancer answering from a
+                        // node that has the block but not yet the receipt, looks
+                        // the same as a chain that never saw it. Keep asking
+                        // until the deadline instead of recording a landed
+                        // transaction as dropped.
                         Ok(Err(error)) => {
-                            debug!(%error, "receipt fetch failed");
-                            None
+                            debug!(%error, "receipt watcher failed, polling by hash");
+                            poll_receipt(&provider, hash, started + receipt_timeout).await
                         }
                         Err(_elapsed) => None,
                     };
@@ -139,6 +151,23 @@ impl Lane {
             None => std::future::pending().await,
         }
     }
+}
+
+/// Asks for a receipt by hash until one arrives or the deadline passes.
+async fn poll_receipt(
+    provider: &DynProvider<Celo>,
+    hash: alloy_primitives::TxHash,
+    deadline: Instant,
+) -> Option<bool> {
+    while Instant::now() < deadline {
+        match provider.get_transaction_receipt(hash).await {
+            Ok(Some(receipt)) => return Some(receipt.status()),
+            Ok(None) => {}
+            Err(error) => debug!(%error, "receipt poll failed"),
+        }
+        tokio::time::sleep(RECEIPT_POLL_INTERVAL).await;
+    }
+    None
 }
 
 async fn pending_nonce(provider: &DynProvider<Celo>, account: Address) -> eyre::Result<u64> {

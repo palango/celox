@@ -28,6 +28,10 @@ pub struct FeeQuote {
 /// underpriced. One RPC every couple of seconds is a cheap price for tracking.
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
+/// Bound on one refresh attempt, so a hung endpoint costs a stale tick rather
+/// than every tick that follows.
+const REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Fetches an initial quote and keeps it fresh. With a fee currency the quote
 /// comes from Celo's parameterized gas price RPCs.
 pub async fn spawn_refresher(
@@ -40,11 +44,15 @@ pub async fn spawn_refresher(
         tick.tick().await; // the first tick fires immediately; skip it
         loop {
             tick.tick().await;
-            match quote(&provider, fee_currency).await {
-                Ok(fresh) => {
+            // Bounded: an endpoint that accepts the request and never answers
+            // would otherwise wedge this task forever, freezing the quote while
+            // the base fee climbs past it.
+            match tokio::time::timeout(REFRESH_TIMEOUT, quote(&provider, fee_currency)).await {
+                Ok(Ok(fresh)) => {
                     let _ = tx.send(fresh);
                 }
-                Err(error) => warn!(%error, "fee refresh failed, keeping previous quote"),
+                Ok(Err(error)) => warn!(%error, "fee refresh failed, keeping previous quote"),
+                Err(_elapsed) => warn!("fee refresh timed out, keeping previous quote"),
             }
         }
     });

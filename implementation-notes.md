@@ -139,6 +139,72 @@ is abandoned and its repo is gone.
 - Logs now disable ANSI colour when stdout is not a terminal, so recipes can
   parse them.
 
+### Thorough review round (2026-08-07): 4 reviewers, 12 fixes
+
+Four independent reviews at `66e8964` — celo-kona's rust-code-reviewer, an
+adversarial-conditions pass, a docs/UX pass, and Codex. Two findings would have
+invalidated results the first time celox was pointed at a real chain.
+
+**Fixed:**
+
+1. **Alloy polls receipts every 7s off localhost** (critical). `poll_interval`
+   is 250ms for `localhost`/`127.0.0.1`/`::1` and **7000ms** for everything
+   else (alloy-rpc-client 2.0.5 client.rs:233). Every milestone was verified on
+   127.0.0.1, so this never showed: on Sepolia every latency would quantise to
+   multiples of 7s and transactions would be counted dropped at ~14s. Now set
+   explicitly via `--poll-interval` (default 250ms), which also lets an operator
+   dial down the read load celox puts on the node under test.
+2. **A failing receipt watcher was recorded as a drop** (critical). Any
+   `get_receipt()` error became `Dropped`, so a transient RPC blip turned a
+   landed transaction into a failure, corrupted the counts, and tripped a nonce
+   resync. Now falls back to polling by hash until the deadline.
+3. **Reported TPS was diluted by the drain**. The divisor spanned spam + drain
+   (up to `--receipt-timeout`), understating the rate worst exactly when the
+   chain is stressed. Now divides by the sending window.
+4. **The pacer could not exceed ~1000 tps.** One permit per tick against
+   tokio's 1ms timer granularity capped the offered rate ~10x below the accepted
+   `--tps 10000`. Now refills by elapsed time. Measured after: 1438 tps
+   sustained on anvil — which is that node's own ceiling (30M ÷ 21k = 1428
+   tx/block), so celox is no longer the bottleneck.
+5. **`FuturesOrdered` head-of-line blocking.** One slow receipt delayed every
+   later result, making status lines bursty and delaying drop detection.
+   Nothing depends on completion order, so it is `FuturesUnordered` now.
+6. **A chain-controlled value reached a panicking conversion.**
+   `intrinsicGas.to::<u64>()` panics (ruint's `to` is `expect`, not truncating);
+   reachable via the mainnet-address directory fallback on a non-Celo chain.
+   Now `u64::try_from` with celox's own error.
+7. **The storage deploy sat outside the all-or-nothing funding guarantee.** The
+   solvency check did not include the deploy, so a marginal root could fund
+   every sender and then fail to deploy. Deploy now runs before funding.
+8. **The fee refresher could wedge forever** on an endpoint that accepts and
+   never answers, freezing the quote while the base fee climbed — reintroducing
+   the collapse the 2s refresh was meant to fix. Refresh attempts are bounded.
+9. **`--writes` was unbounded** and overflowed the analytic gas limit. Capped.
+10. **Funding trusted receipt status alone.** An ERC-20 can return `false` or
+    skim a fee without reverting. Balances are now re-checked after funding.
+11. **`--fund` gives no warning when it cannot cover a window.** Nodes reserve
+    `gas_limit × max_fee` per pending transaction, so 0.1 CELO fails on a chain
+    with a 200 gwei floor. Now warns before the run.
+12. Smaller: status-line rate measured against the real interval rather than the
+    nominal 5s; the second-Ctrl-C message no longer claims "again" when it was
+    the first; `foundry.toml` pins solc 0.8.25 / cancun so `just
+    build-contracts` is reproducible; `MAX_WINDOW`'s comment matches the
+    warning-only behaviour.
+
+**Accepted, documented rather than changed:** latency percentiles cover
+confirmed transactions only (drops waited the full timeout by definition — the
+README now says to read them next to the drop count); a permanently stale fee
+quote fails the run through rejections without naming itself as the cause;
+`Summary::latencies` is unbounded and cloned per percentile call.
+
+**Still deferred:** replace-by-fee for transactions stranded when the base fee
+overtakes their cap; mock-transport tests for `Lane`/`Sender`/`Funder` — Codex
+correctly notes the untested surface is broader than the notes claimed, since it
+covers the whole submission-to-statistics path, not just failure branches. The
+single highest-value test to add: submission succeeds, first receipt query fails
+transiently, a later one returns status 1, and the reporter sees exactly one
+`Sent` and one `Confirmed` with no `Dropped`.
+
 ### M6 — polish (done)
 
 - README covering workloads, the funding/sending/reporting model, throughput

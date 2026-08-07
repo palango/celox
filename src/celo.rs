@@ -75,9 +75,17 @@ pub async fn fee_currency(provider: &DynProvider<Celo>, token: Address) -> Resul
             )
         })?;
 
+    // A directory entry is chain-supplied: convert fallibly so a malformed or
+    // foreign contract produces celox's own error, not a ruint panic.
+    let intrinsic_gas = u64::try_from(config.intrinsicGas).map_err(|_| {
+        eyre::eyre!(
+            "fee currency {token} reports an unusable intrinsic gas of {}",
+            config.intrinsicGas
+        )
+    })?;
     let fee_currency = FeeCurrency {
         token,
-        intrinsic_gas: config.intrinsicGas.to::<u64>(),
+        intrinsic_gas,
         decimals,
     };
     info!(

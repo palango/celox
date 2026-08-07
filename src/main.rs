@@ -91,6 +91,12 @@ struct Args {
     /// How long to wait for a receipt before counting a transaction as dropped
     #[arg(long, value_parser = humantime::parse_duration, default_value = "15s")]
     receipt_timeout: Duration,
+
+    /// How often to poll for receipts. Alloy defaults to 7s for any
+    /// non-localhost endpoint, which would quantise every measured latency;
+    /// raise this to reduce the read load celox itself puts on the node.
+    #[arg(long, value_parser = humantime::parse_duration, default_value = "250ms")]
+    poll_interval: Duration,
 }
 
 #[tokio::main]
@@ -126,7 +132,12 @@ async fn main() -> Result<()> {
         args.data_size <= 128 * 1024,
         "--data-size must be at most 131072 bytes"
     );
-    ensure!(args.writes > 0, "--writes must be at least 1");
+    // Bounded so the analytic gas limit cannot overflow; a single transaction
+    // writing this many slots already exceeds any block gas limit.
+    ensure!(
+        args.writes > 0 && args.writes <= 10_000,
+        "--writes must be between 1 and 10000"
+    );
     ensure!(args.key_space > 0, "--key-space must be at least 1");
     let target_balance = parse_ether(&args.fund)?;
 
@@ -154,6 +165,11 @@ async fn main() -> Result<()> {
         .connect(&args.rpc_url)
         .await?
         .erased();
+    // Alloy picks the poll interval from the URL's hostname: 250ms for
+    // localhost, 7s for everything else. Left alone, a remote endpoint would
+    // report latencies quantised to multiples of 7s and count landed
+    // transactions as dropped.
+    provider.client().set_poll_interval(args.poll_interval);
     let chain_id = provider.get_chain_id().await?;
     info!(root = %root_address, chain_id, "connected");
 
@@ -181,18 +197,9 @@ async fn main() -> Result<()> {
         }),
         None => None,
     };
-    funder::top_up(
-        &provider,
-        root_address,
-        &sender_addresses,
-        target_balance,
-        token_leg.as_ref(),
-        native_fees,
-    )
-    .await?;
-
-    let fees = fees::spawn_refresher(provider.clone(), fee_currency.map(|c| c.token)).await?;
-
+    // Any contract the workload needs is deployed before funding, so the root
+    // still holds the deploy cost when the solvency check runs — funding stays
+    // all or nothing.
     let workload = Arc::new(
         Workload::new(
             args.workload,
@@ -206,6 +213,19 @@ async fn main() -> Result<()> {
         )
         .await?,
     );
+
+    funder::top_up(
+        &provider,
+        root_address,
+        &sender_addresses,
+        target_balance,
+        token_leg.as_ref(),
+        native_fees,
+        args.window,
+    )
+    .await?;
+
+    let fees = fees::spawn_refresher(provider.clone(), fee_currency.map(|c| c.token)).await?;
 
     let pacer = Pacer::start(args.tps);
     let (event_tx, event_rx) = mpsc::unbounded_channel();
@@ -257,7 +277,7 @@ async fn main() -> Result<()> {
     // rather have the process back than the statistics.
     tokio::spawn(async {
         if tokio::signal::ctrl_c().await.is_ok() {
-            warn!("interrupted again, abandoning pending transactions");
+            warn!("interrupted, abandoning pending transactions");
             std::process::exit(130);
         }
     });

@@ -68,7 +68,11 @@ impl Summary {
         Some(sorted[rank])
     }
 
-    pub fn print(&self, elapsed: Duration) {
+    /// Prints the summary. `sending` is the span from the first to the last
+    /// submission — the drain that follows is excluded, since dividing by it
+    /// would understate the rate exactly when a stressed chain makes the drain
+    /// long.
+    pub fn print(&self, sending: Duration) {
         let fmt_latency = |p| match self.latency_percentile(p) {
             Some(d) => format!("{:.2}s", d.as_secs_f64()),
             None => "-".into(),
@@ -81,7 +85,7 @@ impl Summary {
             rejected = self.rejected,
             tps = format!(
                 "{:.1}",
-                self.confirmed as f64 / elapsed.as_secs_f64().max(0.001)
+                self.confirmed as f64 / sending.as_secs_f64().max(0.001)
             ),
             p50 = fmt_latency(50.0),
             p95 = fmt_latency(95.0),
@@ -97,18 +101,32 @@ pub fn spawn(mut events: mpsc::UnboundedReceiver<Event>) -> JoinHandle<Summary> 
         let mut summary = Summary::default();
         const STATUS_INTERVAL: Duration = Duration::from_secs(5);
         let mut confirmed_at_last_tick = 0;
+        let mut last_tick = started;
+        let mut first_sent: Option<Instant> = None;
+        let mut last_sent = started;
         let mut tick = tokio::time::interval(STATUS_INTERVAL);
         tick.tick().await; // the first tick fires immediately; skip it
         loop {
             tokio::select! {
                 event = events.recv() => match event {
-                    Some(event) => summary.record(event),
+                    Some(event) => {
+                        if matches!(event, Event::Sent) {
+                            first_sent.get_or_insert_with(Instant::now);
+                            last_sent = Instant::now();
+                        }
+                        summary.record(event);
+                    }
                     None => break,
                 },
                 _ = tick.tick() => {
+                    // Measure the real gap: a late tick would otherwise be
+                    // divided by the nominal interval and dip the reported rate
+                    // for reasons that have nothing to do with the chain.
+                    let now = Instant::now();
                     let interval_tps = (summary.confirmed - confirmed_at_last_tick) as f64
-                        / STATUS_INTERVAL.as_secs_f64();
+                        / now.duration_since(last_tick).as_secs_f64().max(0.001);
                     confirmed_at_last_tick = summary.confirmed;
+                    last_tick = now;
                     info!(
                         sent = summary.sent,
                         confirmed = summary.confirmed,
@@ -121,7 +139,11 @@ pub fn spawn(mut events: mpsc::UnboundedReceiver<Event>) -> JoinHandle<Summary> 
                 }
             }
         }
-        summary.print(started.elapsed());
+        let sending = match first_sent {
+            Some(first) => last_sent.duration_since(first),
+            None => Duration::ZERO,
+        };
+        summary.print(sending);
         summary
     })
 }

@@ -9,7 +9,7 @@ use celo_alloy_network::Celo;
 use celo_alloy_rpc_types::CeloTransactionRequest;
 use eyre::{Result, bail, ensure};
 use futures::future::try_join_all;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::{
     celo,
@@ -44,6 +44,7 @@ pub async fn top_up(
     native_target: U256,
     token_leg: Option<&TokenLeg>,
     fees: FeeQuote,
+    window: usize,
 ) -> Result<()> {
     let root_native = provider.get_balance(root).await?;
     let root_token = match token_leg {
@@ -60,17 +61,17 @@ pub async fn top_up(
         _ => info!(celo = %format_ether(root_native), "root balance"),
     }
 
-    let native_shortfalls = native_shortfalls(provider, senders, native_target).await?;
-    let token_shortfalls = match token_leg {
+    let native_topups = native_shortfalls(provider, senders, native_target).await?;
+    let token_topups = match token_leg {
         Some(leg) => token_shortfalls(provider, senders, leg).await?,
         None => Vec::new(),
     };
 
     // Solvency for both legs before the first send: funding must be all or
     // nothing, not a partial airdrop that dies halfway.
-    let native_total: U256 = native_shortfalls.iter().map(|(_, amount)| *amount).sum();
-    let funding_gas = U256::from(native_shortfalls.len() as u64 * gas::TRANSFER)
-        + U256::from(token_shortfalls.len() as u64 * ERC20_TRANSFER_GAS);
+    let native_total: U256 = native_topups.iter().map(|(_, amount)| *amount).sum();
+    let funding_gas = U256::from(native_topups.len() as u64 * gas::TRANSFER)
+        + U256::from(token_topups.len() as u64 * ERC20_TRANSFER_GAS);
     let native_needed = native_total + funding_gas * U256::from(fees.max_fee);
     ensure!(
         root_native >= native_needed,
@@ -80,7 +81,7 @@ pub async fn top_up(
         format_ether(native_needed),
     );
     if let (Some(leg), Some(balance)) = (token_leg, root_token) {
-        let token_total: U256 = token_shortfalls.iter().map(|(_, amount)| *amount).sum();
+        let token_total: U256 = token_topups.iter().map(|(_, amount)| *amount).sum();
         ensure!(
             balance >= token_total,
             "root {root} holds {} of fee currency {} but funding all {} senders needs {}",
@@ -91,13 +92,28 @@ pub async fn top_up(
         );
     }
 
-    if native_shortfalls.is_empty() && token_shortfalls.is_empty() {
+    // A node reserves gas_limit * max_fee for every pending transaction, so a
+    // sender whose balance cannot cover its whole window has the tail rejected
+    // as underfunded. gas::TRANSFER is the floor — every workload costs at
+    // least that — so this is a lower bound on what a sender needs.
+    let window_reserve =
+        U256::from(window as u64 * gas::TRANSFER).saturating_mul(U256::from(fees.max_fee));
+    if native_target < window_reserve {
+        warn!(
+            fund = %format_ether(native_target),
+            needed = %format_ether(window_reserve),
+            "--fund is below what a node reserves for a full window at the current fee; \
+             expect insufficient-funds rejections"
+        );
+    }
+
+    if native_topups.is_empty() && token_topups.is_empty() {
         info!("all senders already funded");
         return Ok(());
     }
 
-    let mut requests = Vec::with_capacity(native_shortfalls.len() + token_shortfalls.len());
-    for (address, amount) in &native_shortfalls {
+    let mut requests = Vec::with_capacity(native_topups.len() + token_topups.len());
+    for (address, amount) in &native_topups {
         requests.push(
             CeloTransactionRequest::default()
                 .to(*address)
@@ -106,7 +122,7 @@ pub async fn top_up(
         );
     }
     if let Some(leg) = token_leg {
-        for (address, amount) in &token_shortfalls {
+        for (address, amount) in &token_topups {
             requests.push(
                 celo::erc20_transfer(provider, leg.token, *address, *amount)
                     .gas_limit(ERC20_TRANSFER_GAS),
@@ -141,9 +157,22 @@ pub async fn top_up(
             None => bail!("timed out waiting for a funding receipt"),
         }
     }
+    // A receipt with status 1 does not prove the tokens arrived: an ERC-20 may
+    // return false, or skim a transfer fee, without reverting. Confirm against
+    // balances before a run depends on them.
+    if let Some(leg) = token_leg {
+        let still_short = token_shortfalls(provider, senders, leg).await?;
+        ensure!(
+            still_short.is_empty(),
+            "{} senders are still below the fee-currency target after funding; \
+             is {} a standard ERC-20?",
+            still_short.len(),
+            leg.token
+        );
+    }
     info!(
-        native = native_shortfalls.len(),
-        token = token_shortfalls.len(),
+        native = native_topups.len(),
+        token = token_topups.len(),
         "senders funded"
     );
     Ok(())

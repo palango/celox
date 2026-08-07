@@ -66,20 +66,36 @@ fee quote refreshes every two seconds, which is what keeps transactions valid
 while a saturated chain drives its base fee up.
 
 **Results.** A status line every five seconds, then a summary with confirmed,
-reverted, dropped and rejected counts plus inclusion-latency percentiles. The
-exit code is zero only if every transaction sent was confirmed with status 1 —
-a run that sends nothing fails too, so this works as a CI gate.
+reverted, dropped and rejected counts plus latency percentiles. The exit code is
+zero only if every transaction sent was confirmed with status 1 — a run that
+sends nothing fails too, so this works as a CI gate.
 
-Ctrl-C stops sending and drains outstanding receipts before reporting; a second
-Ctrl-C abandons them and exits immediately.
+The reported rate divides confirmations by the sending window, not by the run
+including its drain. The percentiles cover confirmed transactions only: anything
+counted `dropped` waited the full `--receipt-timeout` by definition, so read the
+percentiles alongside the drop count rather than on their own.
+
+Ctrl-C stops sending and drains outstanding receipts before reporting; pressing
+it again abandons them and exits 130. Once a `--duration` run has finished
+sending, it is already draining, so a single Ctrl-C abandons.
 
 ## Throughput
 
 Offered load above what the chain can include just queues and then times out as
 dropped. The ceiling is the block gas limit divided by the workload's gas cost:
 anvil at 30M gas fits about 226 `storage` transactions (≈133k gas each) per
-one-second block, so `--tps 300` there reports drops by design. Raise
-`--senders` rather than `--window` to add capacity.
+one-second block, so `--tps 300` there reports drops by design. The cheap
+`transfer` workload reaches roughly 1400 tps on the same node. Raise `--senders`
+rather than `--window` to add capacity — nodes cap pending transactions per
+account.
+
+Two settings matter away from localhost. `--fund` defaults to 0.1 CELO, which
+suits a dev chain with a negligible base fee; a chain with a real floor (Celo
+mainnet's is 200 gwei) needs one to two orders of magnitude more, because a node
+reserves `gas_limit × max_fee` for every pending transaction and celox will warn
+if the target cannot cover a full window. `--poll-interval` defaults to 250ms;
+alloy would otherwise poll a remote endpoint every 7 seconds and quantise every
+measured latency to that.
 
 ## Development
 

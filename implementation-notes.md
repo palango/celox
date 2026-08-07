@@ -33,6 +33,11 @@ is abandoned and its repo is gone.
   - Funding happens once at startup; no refill loop during long runs.
   - Fee quote refresh is global, every 30s, native-denominated only (cip64
     fee quoting comes with M4).
+  - `Summary::latencies` is unbounded (16 B per confirmed tx): a multi-hour
+    high-tps soak run will eat memory. Switch to a histogram if soaks land.
+  - Pacer adds one permit per tick with `MissedTickBehavior::Skip`: above a
+    few hundred tps, scheduler jitter loses tokens and undershoots the
+    target. Refill by elapsed time if high rates become a goal.
 
 ## Verification strategy (settled with Paul, 2026-08-07)
 

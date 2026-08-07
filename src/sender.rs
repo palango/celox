@@ -45,19 +45,42 @@ pub struct Sender {
     pub stop: watch::Receiver<bool>,
 }
 
+/// What the sender loop does next, given its current state. Pure so the
+/// break/resync/send truth table is directly testable.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Step {
+    /// Stop signal seen and the window is empty: exit the loop.
+    Finish,
+    /// The nonce is suspect and the window has drained: refetch it.
+    Resync,
+    /// Only wait for receipts: stopping, resync pending, or the window is full.
+    Drain,
+    /// Room in the window and sending is allowed.
+    Send,
+}
+
+fn step(stopped: bool, need_resync: bool, in_flight: usize, window: usize) -> Step {
+    match (stopped, need_resync, in_flight) {
+        (true, _, 0) => Step::Finish,
+        (false, true, 0) => Step::Resync,
+        (true, _, _) | (_, true, _) => Step::Drain,
+        _ if in_flight >= window => Step::Drain,
+        _ => Step::Send,
+    }
+}
+
 impl Sender {
-    pub fn spawn(self) -> JoinHandle<()> {
+    pub fn spawn(self) -> JoinHandle<eyre::Result<()>> {
         tokio::spawn(self.run())
     }
 
-    async fn run(mut self) {
-        let mut nonce = match self.fetch_pending_nonce().await {
-            Ok(nonce) => nonce,
-            Err(error) => {
-                warn!(sender = %self.address, %error, "initial nonce fetch failed, sender not starting");
-                return;
-            }
-        };
+    async fn run(mut self) -> eyre::Result<()> {
+        let mut nonce = self.fetch_pending_nonce().await.map_err(|error| {
+            eyre::eyre!(
+                "sender {}: initial nonce fetch failed: {error}",
+                self.address
+            )
+        })?;
         // Set when a transaction is dropped or rejected: the on-chain nonce is
         // then unknown, so stop sending, let the window drain, and refetch.
         let mut need_resync = false;
@@ -65,44 +88,41 @@ impl Sender {
 
         loop {
             let stopped = *self.stop.borrow();
-            if in_flight.is_empty() {
-                if stopped {
-                    break;
-                }
-                if need_resync {
-                    match self.fetch_pending_nonce().await {
-                        Ok(fresh) => {
-                            debug!(sender = %self.address, nonce = fresh, "nonce resynced");
-                            nonce = fresh;
-                            need_resync = false;
-                        }
-                        Err(error) => {
-                            warn!(sender = %self.address, %error, "nonce resync failed, retrying");
-                            tokio::time::sleep(Duration::from_secs(1)).await;
-                            continue;
-                        }
+            let step = step(stopped, need_resync, in_flight.len(), self.window);
+            match step {
+                Step::Finish => break,
+                Step::Resync => match self.fetch_pending_nonce().await {
+                    Ok(fresh) => {
+                        debug!(sender = %self.address, nonce = fresh, "nonce resynced");
+                        nonce = fresh;
+                        need_resync = false;
                     }
-                }
-            }
-            let can_send = !stopped && !need_resync && in_flight.len() < self.window;
-
-            tokio::select! {
-                biased;
-                _ = self.stop.changed(), if !stopped => {}
-                Some((latency, status)) = in_flight.next() => {
-                    need_resync |= self.record(latency, status);
-                }
-                _ = self.pacer.acquire(), if can_send => {
-                    match self.send_one(nonce).await {
-                        Some(wait) => {
-                            nonce += 1;
-                            in_flight.push_back(wait);
+                    Err(error) => {
+                        warn!(sender = %self.address, %error, "nonce resync failed, retrying");
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                },
+                Step::Drain | Step::Send => {
+                    tokio::select! {
+                        biased;
+                        _ = self.stop.changed(), if !stopped => {}
+                        Some((latency, status)) = in_flight.next() => {
+                            need_resync |= self.record(latency, status);
                         }
-                        None => need_resync = true,
+                        _ = self.pacer.acquire(), if step == Step::Send => {
+                            match self.send_one(nonce).await {
+                                Some(wait) => {
+                                    nonce += 1;
+                                    in_flight.push_back(wait);
+                                }
+                                None => need_resync = true,
+                            }
+                        }
                     }
                 }
             }
         }
+        Ok(())
     }
 
     /// Submits one transaction; returns the receipt wait, or `None` if the
@@ -168,5 +188,28 @@ impl Sender {
             .get_transaction_count(self.address)
             .pending()
             .await?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn step_truth_table() {
+        let window = 3;
+        // Normal operation: send until the window is full, then drain.
+        assert_eq!(step(false, false, 0, window), Step::Send);
+        assert_eq!(step(false, false, 2, window), Step::Send);
+        assert_eq!(step(false, false, 3, window), Step::Drain);
+        // A suspect nonce blocks sending until the window drains, then resyncs.
+        assert_eq!(step(false, true, 2, window), Step::Drain);
+        assert_eq!(step(false, true, 0, window), Step::Resync);
+        // Stopping drains outstanding receipts, then finishes.
+        assert_eq!(step(true, false, 2, window), Step::Drain);
+        assert_eq!(step(true, false, 0, window), Step::Finish);
+        // Stop wins over resync: no point refetching a nonce we won't use.
+        assert_eq!(step(true, true, 0, window), Step::Finish);
+        assert_eq!(step(true, true, 2, window), Step::Drain);
     }
 }

@@ -147,11 +147,31 @@ async fn main() -> Result<()> {
             info!("interrupted, draining");
         }
     }
-    stop_tx.send(true)?;
+    // Cannot fail while main's own stop_rx binding is alive, but never let a
+    // refactor of that binding skip the summary.
+    let _ = stop_tx.send(true);
 
-    join_all(tasks).await;
+    let mut sender_failed = false;
+    for result in join_all(tasks).await {
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                warn!(%error, "sender failed");
+                sender_failed = true;
+            }
+            Err(error) => {
+                warn!(%error, "sender task panicked");
+                sender_failed = true;
+            }
+        }
+    }
     let summary = reporter.await?;
-    std::process::exit(summary.exit_code());
+    let exit_code = if sender_failed {
+        1
+    } else {
+        summary.exit_code()
+    };
+    std::process::exit(exit_code);
 }
 
 async fn connect(rpc_url: &str, signer: PrivateKeySigner) -> Result<DynProvider<Celo>> {

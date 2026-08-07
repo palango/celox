@@ -47,11 +47,15 @@ impl Summary {
         }
     }
 
-    /// Non-zero when any transaction failed to land cleanly.
+    /// Non-zero when any transaction failed to land cleanly — or none were
+    /// sent at all, which for a spammer is a failure, not a clean run.
     pub fn exit_code(&self) -> i32 {
-        let all_landed = self.confirmed == self.sent;
         let clean = self.reverted == 0 && self.dropped == 0 && self.rejected == 0;
-        if all_landed && clean { 0 } else { 1 }
+        if self.sent > 0 && self.confirmed == self.sent && clean {
+            0
+        } else {
+            1
+        }
     }
 
     pub fn latency_percentile(&self, percentile: f64) -> Option<Duration> {
@@ -91,8 +95,9 @@ pub fn spawn(mut events: mpsc::UnboundedReceiver<Event>) -> JoinHandle<Summary> 
     tokio::spawn(async move {
         let started = Instant::now();
         let mut summary = Summary::default();
+        const STATUS_INTERVAL: Duration = Duration::from_secs(5);
         let mut confirmed_at_last_tick = 0;
-        let mut tick = tokio::time::interval(Duration::from_secs(5));
+        let mut tick = tokio::time::interval(STATUS_INTERVAL);
         tick.tick().await; // the first tick fires immediately; skip it
         loop {
             tokio::select! {
@@ -101,7 +106,8 @@ pub fn spawn(mut events: mpsc::UnboundedReceiver<Event>) -> JoinHandle<Summary> 
                     None => break,
                 },
                 _ = tick.tick() => {
-                    let interval_tps = (summary.confirmed - confirmed_at_last_tick) as f64 / 5.0;
+                    let interval_tps = (summary.confirmed - confirmed_at_last_tick) as f64
+                        / STATUS_INTERVAL.as_secs_f64();
                     confirmed_at_last_tick = summary.confirmed;
                     info!(
                         sent = summary.sent,
@@ -163,6 +169,11 @@ mod tests {
             s.record(event);
         }
         assert_eq!(s.exit_code(), 1);
+    }
+
+    #[test]
+    fn empty_run_exits_nonzero() {
+        assert_eq!(Summary::default().exit_code(), 1);
     }
 
     #[test]

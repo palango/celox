@@ -40,10 +40,12 @@ pub async fn top_up(
     }
 
     let total: U256 = shortfalls.iter().map(|(_, amount)| *amount).sum();
+    let gas: U256 = U256::from(shortfalls.len()) * U256::from(21_000u64) * U256::from(fees.max_fee);
+    let needed = total + gas;
     let root_balance = provider.get_balance(root).await?;
     ensure!(
-        root_balance > total,
-        "root {root} holds {root_balance} wei but funding needs {total} wei"
+        root_balance >= needed,
+        "root {root} holds {root_balance} wei but funding needs {needed} wei (incl. gas)"
     );
 
     let mut nonce = provider.get_transaction_count(root).pending().await?;

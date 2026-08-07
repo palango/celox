@@ -111,7 +111,9 @@ async fn main() -> Result<()> {
     // history and ps output.
     let private_key = std::env::var("CELOX_PRIVATE_KEY")
         .map_err(|_| eyre::eyre!("set CELOX_PRIVATE_KEY to the root account's private key"))?;
-    let root_signer: PrivateKeySigner = private_key.parse()?;
+    let root_signer: PrivateKeySigner = private_key
+        .parse()
+        .map_err(|_| eyre::eyre!("CELOX_PRIVATE_KEY is not a valid private key"))?;
     let root_address = root_signer.address();
     let root = connect(&args.rpc_url, root_signer.clone()).await?;
     let chain_id = root.get_chain_id().await?;

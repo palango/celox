@@ -9,7 +9,6 @@ description = "Transaction load-testing tool for Celo chains"
 # Pinned to the pushed tip of palango/cip64-client-request; switch to main after merge.
 celo-alloy-network = { git = "https://github.com/celo-org/celo-kona", rev = "5bff854" }
 celo-alloy-rpc-types = { git = "https://github.com/celo-org/celo-kona", rev = "5bff854" }
-celo-alloy-consensus = { git = "https://github.com/celo-org/celo-kona", rev = "5bff854" }
 
 # Alloy family pinned to celo-kona's workspace versions to avoid trait-bound skew.
 alloy-contract = "=2.0.5"

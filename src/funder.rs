@@ -7,7 +7,7 @@ use alloy_primitives::{
 use alloy_provider::{DynProvider, Provider};
 use celo_alloy_network::{Celo, ReceiptResponse, TransactionBuilder};
 use celo_alloy_rpc_types::CeloTransactionRequest;
-use eyre::{Result, ensure};
+use eyre::{Result, WrapErr, ensure};
 use futures::future::try_join_all;
 use tracing::info;
 
@@ -109,7 +109,9 @@ pub async fn top_up(
         }
     }
     for wait in pending {
-        let receipt = tokio::time::timeout(Duration::from_secs(30), wait.get_receipt()).await??;
+        let receipt = tokio::time::timeout(Duration::from_secs(30), wait.get_receipt())
+            .await
+            .wrap_err("timed out waiting for a funding receipt")??;
         ensure!(
             receipt.status(),
             "funding transaction {} reverted",

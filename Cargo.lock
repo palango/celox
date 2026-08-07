@@ -1250,7 +1250,6 @@ dependencies = [
  "alloy-provider",
  "alloy-signer-local",
  "alloy-sol-types",
- "celo-alloy-consensus",
  "celo-alloy-network",
  "celo-alloy-rpc-types",
  "clap",

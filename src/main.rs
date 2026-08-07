@@ -16,7 +16,7 @@ struct Args {
     rpc_url: String,
 
     /// Private key of the funded root account
-    #[arg(long, env = "CELOX_PRIVATE_KEY")]
+    #[arg(long, env = "CELOX_PRIVATE_KEY", hide_env_values = true)]
     private_key: String,
 }
 
@@ -60,7 +60,7 @@ async fn main() -> Result<()> {
         );
     }
     info!(
-        block = receipt.block_number().unwrap_or_default(),
+        block = ?receipt.block_number(),
         gas_used = receipt.gas_used(),
         "transaction confirmed"
     );

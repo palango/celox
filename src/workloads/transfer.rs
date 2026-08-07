@@ -1,6 +1,8 @@
 use alloy_primitives::{Address, U256};
 use celo_alloy_rpc_types::CeloTransactionRequest;
 
+use crate::gas;
+
 /// Baseline workload: a 1-wei self-transfer, so senders only ever burn gas.
 pub struct Transfer;
 
@@ -9,7 +11,7 @@ impl Transfer {
         CeloTransactionRequest::default()
             .to(sender)
             .value(U256::from(1))
-            .gas_limit(21_000)
+            .gas_limit(gas::TRANSFER)
     }
 }
 

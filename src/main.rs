@@ -1,4 +1,6 @@
+mod celo;
 mod funder;
+mod gas;
 mod keys;
 mod pacer;
 mod report;
@@ -7,7 +9,10 @@ mod workloads;
 
 use std::{sync::Arc, time::Duration};
 
-use alloy_primitives::utils::parse_ether;
+use alloy_primitives::{
+    Address, U256,
+    utils::{parse_ether, parse_units},
+};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
 use celo_alloy_network::{Celo, EthereumWallet};
@@ -59,9 +64,18 @@ struct Args {
     #[arg(long, value_parser = humantime::parse_duration)]
     duration: Option<Duration>,
 
+    /// Fee currency address for the `cip64` workload
+    #[arg(long)]
+    fee_currency: Option<Address>,
+
     /// Native balance each sender is topped up to at startup, in CELO
     #[arg(long, default_value = "0.1")]
     fund: String,
+
+    /// Fee-currency balance each sender is topped up to at startup, in whole
+    /// tokens (scaled by the token's own decimals)
+    #[arg(long, default_value = "1")]
+    fund_token: String,
 
     /// How long to wait for a receipt before counting a transaction as dropped
     #[arg(long, value_parser = humantime::parse_duration, default_value = "15s")]
@@ -103,28 +117,53 @@ async fn main() -> Result<()> {
     let chain_id = root.get_chain_id().await?;
     info!(root = %root_address, chain_id, "connected");
 
-    let fees = spawn_fee_refresher(root.clone()).await?;
+    // The workload's fee currency, validated against the chain's directory.
+    // Resolved before funding because the funder's token leg depends on it.
+    let fee_currency = match (args.workload, args.fee_currency) {
+        (WorkloadKind::Cip64, Some(token)) => Some(celo::fee_currency(&root, token).await?),
+        (WorkloadKind::Cip64, None) => {
+            eyre::bail!("the cip64 workload needs --fee-currency")
+        }
+        (_, Some(_)) => eyre::bail!("--fee-currency only applies to the cip64 workload"),
+        (_, None) => None,
+    };
 
+    // The funder's own transactions always pay native fees, so it gets a
+    // one-shot native quote; the senders' refreshed quote below is denominated
+    // in the workload's fee currency when one is set.
+    let native_fees = native_quote(&root).await?;
     let sender_signers: Vec<PrivateKeySigner> = (0..args.senders)
         .map(|index| keys::derive_sender(&root_signer, index))
         .collect::<Result<_>>()?;
     let sender_addresses: Vec<_> = sender_signers.iter().map(|s| s.address()).collect();
+    let token_leg = match fee_currency {
+        Some(currency) => Some(funder::TokenLeg {
+            token: currency.token,
+            target: parse_units(&args.fund_token, currency.decimals)?.into(),
+            decimals: currency.decimals,
+        }),
+        None => None,
+    };
     funder::top_up(
         &root,
         root_address,
         &sender_addresses,
         target_balance,
-        *fees.borrow(),
+        token_leg.as_ref(),
+        native_fees,
         chain_id,
     )
     .await?;
+
+    let fees = spawn_fee_refresher(root.clone(), fee_currency.map(|c| c.token)).await?;
 
     let mut workload = Workload::new(
         args.workload,
         workloads::Config {
             data_size: args.data_size,
+            fee_currency,
         },
-    );
+    )?;
     workload.setup(&root).await?;
     let workload = Arc::new(workload);
 
@@ -217,28 +256,61 @@ async fn connect(rpc_url: &str, signer: PrivateKeySigner) -> Result<DynProvider<
     Ok(provider.erased())
 }
 
-/// Fetches an initial EIP-1559 fee estimate and keeps refreshing it every 30s.
-async fn spawn_fee_refresher(provider: DynProvider<Celo>) -> Result<watch::Receiver<FeeQuote>> {
-    let estimate = provider.estimate_eip1559_fees().await?;
-    let (tx, rx) = watch::channel(FeeQuote {
-        max_fee: estimate.max_fee_per_gas,
-        tip: estimate.max_priority_fee_per_gas,
-    });
+/// Fetches an initial fee quote and keeps refreshing it every 30s. With a fee
+/// currency the quote is denominated in that currency; otherwise in wei.
+async fn spawn_fee_refresher(
+    provider: DynProvider<Celo>,
+    fee_currency: Option<Address>,
+) -> Result<watch::Receiver<FeeQuote>> {
+    let (tx, rx) = watch::channel(quote(&provider, fee_currency).await?);
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(30));
         tick.tick().await; // the first tick fires immediately; skip it
         loop {
             tick.tick().await;
-            match provider.estimate_eip1559_fees().await {
-                Ok(estimate) => {
-                    let _ = tx.send(FeeQuote {
-                        max_fee: estimate.max_fee_per_gas,
-                        tip: estimate.max_priority_fee_per_gas,
-                    });
+            match quote(&provider, fee_currency).await {
+                Ok(fresh) => {
+                    let _ = tx.send(fresh);
                 }
                 Err(error) => warn!(%error, "fee refresh failed, keeping previous quote"),
             }
         }
     });
     Ok(rx)
+}
+
+async fn quote(provider: &DynProvider<Celo>, fee_currency: Option<Address>) -> Result<FeeQuote> {
+    match fee_currency {
+        None => native_quote(provider).await,
+        Some(token) => cip64_quote(provider, token).await,
+    }
+}
+
+/// Native EIP-1559 estimate; also used one-shot for the funder's transactions.
+async fn native_quote(provider: &DynProvider<Celo>) -> Result<FeeQuote> {
+    let estimate = provider.estimate_eip1559_fees().await?;
+    Ok(FeeQuote {
+        max_fee: estimate.max_fee_per_gas,
+        tip: estimate.max_priority_fee_per_gas,
+    })
+}
+
+/// Fee-currency-denominated quote from Celo's parameterized gas price RPCs,
+/// with the same fee cap formula as celo-alloy's CeloGasFiller: room for the
+/// base fee to double, preserving the tip.
+async fn cip64_quote(provider: &DynProvider<Celo>, token: Address) -> Result<FeeQuote> {
+    let gas_price: U256 = provider
+        .raw_request("eth_gasPrice".into(), (token,))
+        .await?;
+    let tip: U256 = provider
+        .raw_request("eth_maxPriorityFeePerGas".into(), (token,))
+        .await?;
+    let gas_price = u128::try_from(gas_price)?;
+    let tip = u128::try_from(tip)?;
+    let max_fee = if gas_price > tip {
+        2 * (gas_price - tip) + tip
+    } else {
+        (2 * gas_price).max(tip)
+    };
+    Ok(FeeQuote { max_fee, tip })
 }

@@ -12,9 +12,11 @@ celo-alloy-rpc-types = { git = "https://github.com/celo-org/celo-kona", rev = "5
 celo-alloy-consensus = { git = "https://github.com/celo-org/celo-kona", rev = "5bff854" }
 
 # Alloy family pinned to celo-kona's workspace versions to avoid trait-bound skew.
+alloy-contract = "=2.0.5"
 alloy-provider = { version = "=2.0.5", features = ["reqwest"] }
 alloy-signer-local = "=2.0.5"
 alloy-primitives = "1.6.0"
+alloy-sol-types = "1.6.0"
 
 tokio = { version = "1.49", features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
 clap = { version = "4", features = ["derive", "env"] }

@@ -76,6 +76,42 @@ is abandoned and its repo is gone.
   mock-transport `Asserter` — proposed as standalone task, not milestone
   filler.
 
+### M4 — cip64 workload (done)
+
+- Verified on celo-reth dev node (chain 1337, 1s blocks): 110/110 confirmed
+  at 10 tps, exit 0; sender0 fee-currency balance 0.9970e18 after the run —
+  gas debited in ce16, not CELO. Recipe: `just e2e-cip64` (uses bash-3.2-safe
+  redirects; macOS `/usr/bin/env bash` may resolve to 3.2).
+
+
+- `workloads::Cip64`: 1-wei self-transfer with `fee_currency` set; gas =
+  `gas::cip64_transfer(intrinsic)` where the per-currency intrinsic surcharge
+  comes from the FeeCurrencyDirectory (`getCurrencyConfig`), resolved through
+  the registry `0x…ce10` with a mainnet-address fallback for dev chains that
+  have no registry. `--fee-currency` is required for (and exclusive to) this
+  workload; unlisted currencies and adapter contracts are rejected up front
+  (adapters revert on `decimals()` and have no `transfer()` — Paul's
+  correction: fee-currency *underlyings* like USDT are 6-decimal; celox reads
+  the token's actual `decimals()` and uses it for `--fund-token` parsing and
+  display instead of assuming 18).
+- `gas` module now owns all intrinsic-gas shapes (`TRANSFER`,
+  `calldata_to_eoa`, `cip64_transfer`) — one home, exact prices, no padding.
+- Funder: native leg + token leg; shows root balances for both at startup and
+  bails before sending anything if either leg is insolvent (Paul's
+  requirement: all-or-nothing funding).
+- Fee quotes: funder uses a one-shot native quote; senders get a refreshed
+  quote denominated in the fee currency via the parameterized
+  `eth_gasPrice`/`eth_maxPriorityFeePerGas [feeCurrency]` RPCs with
+  CeloGasFiller's cap formula. The filler itself is bypassed by presetting
+  (3 RPCs/tx at spam rates); its semantics are kept.
+- Alloy style per Paul: contract calls via `sol!` + `#[sol(rpc)]` instances
+  (`IErc20`, `IRegistry`, `IFeeCurrencyDirectory`), no manual abi
+  encode/decode. Works cleanly with `Provider<Celo>`.
+- `just e2e-cip64`: celo-reth dev node (chain 1337, 1s blocks, dev key root);
+  asserts exit 0 plus sender0's fee-currency balance strictly between 0 and
+  the funded 1e18 — gas debited in the token. Sender0's address is stable
+  because derivation is deterministic (`0x47d5…Ed17` for the dev key).
+
 ## Verification strategy (settled with Paul, 2026-08-07)
 
 - **anvil** for all non-CIP-64 work (M1–M3, M5 native mode): standard EIP-1559

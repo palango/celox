@@ -1,0 +1,44 @@
+{
+  "abi": [
+    {
+      "type": "function",
+      "name": "slots",
+      "inputs": [
+        {
+          "name": "",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "write",
+      "inputs": [
+        {
+          "name": "start",
+          "type": "uint256",
+          "internalType": "uint256"
+        },
+        {
+          "name": "count",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    }
+  ],
+  "bytecode": {
+    "object": "0x6080604052348015600e575f80fd5b5061010b8061001c5f395ff3fe6080604052348015600e575f80fd5b50600436106030575f3560e01c8063387dd9e91460345780639c0e3f7a146062575b5f80fd5b6050603f36600460a0565b5f6020819052908152604090205481565b60405190815260200160405180910390f35b6071606d36600460b6565b6073565b005b5f5b81811015609b578281015f90815260208190526040902080546001908101909155016075565b505050565b5f6020828403121560af575f80fd5b5035919050565b5f806040838503121560c6575f80fd5b5050803592602090910135915056fea2646970667358221220daef8b7e46f9eec6469174026f2390909d69d72c0147f77aa49604278145e75464736f6c63430008190033"
+  }
+}

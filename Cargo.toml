@@ -15,7 +15,7 @@ alloy-contract = "=2.0.5"
 alloy-provider = { version = "=2.0.5", features = ["reqwest"] }
 alloy-signer-local = "=2.0.5"
 alloy-primitives = "1.6.0"
-alloy-sol-types = "1.6.0"
+alloy-sol-types = { version = "1.6.0", features = ["json"] }
 
 tokio = { version = "1.49", features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
 clap = { version = "4", features = ["derive", "env"] }

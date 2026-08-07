@@ -1,18 +1,20 @@
 //! Transaction workloads.
 //!
 //! Adding a workload: new file in this directory, a variant on both enums
-//! below, and arms in `setup`/`next`; a workload with a CLI knob also gets a
+//! below, and an arm in `new`/`next`; a workload with a CLI knob also gets a
 //! field on `Config`. `next` must set everything the workload knows (to, value,
 //! input, gas limit); the sender loop fills in the account fields (from, nonce,
 //! fees).
 //!
 //! Chain facts that another subsystem also needs (the cip64 fee currency: the
 //! funder's token leg depends on it) are resolved once by main and passed in
-//! `Config`. Facts only the workload itself needs (a deployed contract's
-//! address) are resolved by the workload in `setup()`.
+//! `Config`. Facts only the workload itself needs (the address of a contract it
+//! deploys) are resolved by the workload while `new` builds it, so that by the
+//! time a workload exists it is ready to produce transactions.
 
 mod calldata;
 mod cip64;
+mod storage;
 mod transfer;
 
 use alloy_primitives::Address;
@@ -23,6 +25,7 @@ use eyre::{OptionExt, Result};
 
 pub use calldata::Calldata;
 pub use cip64::Cip64;
+pub use storage::Storage;
 pub use transfer::Transfer;
 
 use crate::celo::FeeCurrency;
@@ -35,6 +38,8 @@ pub enum WorkloadKind {
     Calldata,
     /// 1-wei self-transfers paying gas in a fee currency (CIP-64)
     Cip64,
+    /// Storage writes against one shared contract
+    Storage,
 }
 
 /// Workload settings from the CLI. Each workload reads only the fields it needs.
@@ -42,16 +47,21 @@ pub enum WorkloadKind {
 pub struct Config {
     pub data_size: usize,
     pub fee_currency: Option<FeeCurrency>,
+    pub writes: u64,
+    pub key_space: u64,
 }
 
 pub enum Workload {
     Transfer(Transfer),
     Calldata(Calldata),
     Cip64(Cip64),
+    Storage(Storage),
 }
 
 impl Workload {
-    pub fn new(kind: WorkloadKind, config: Config) -> Result<Self> {
+    /// Builds the workload, running any on-chain preparation it needs (a
+    /// contract deploy) with the root account.
+    pub async fn new(kind: WorkloadKind, config: Config, root: &DynProvider<Celo>) -> Result<Self> {
         Ok(match kind {
             WorkloadKind::Transfer => Self::Transfer(Transfer),
             WorkloadKind::Calldata => Self::Calldata(Calldata::new(config.data_size)),
@@ -60,14 +70,10 @@ impl Workload {
                     .fee_currency
                     .ok_or_eyre("the cip64 workload needs a resolved fee currency")?,
             )),
+            WorkloadKind::Storage => {
+                Self::Storage(Storage::deploy(root, config.writes, config.key_space).await?)
+            }
         })
-    }
-
-    /// One-time on-chain preparation (contract deploys), run with the root account.
-    pub async fn setup(&mut self, _root: &DynProvider<Celo>) -> Result<()> {
-        match self {
-            Self::Transfer(_) | Self::Calldata(_) | Self::Cip64(_) => Ok(()),
-        }
     }
 
     /// Produces the next transaction for `sender`.
@@ -76,6 +82,7 @@ impl Workload {
             Self::Transfer(workload) => workload.next(sender),
             Self::Calldata(workload) => workload.next(sender),
             Self::Cip64(workload) => workload.next(sender),
+            Self::Storage(workload) => workload.next(sender),
         }
     }
 }

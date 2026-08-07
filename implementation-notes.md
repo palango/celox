@@ -112,6 +112,56 @@ is abandoned and its repo is gone.
   the funded 1e18 — gas debited in the token. Sender0's address is stable
   because derivation is deterministic (`0x47d5…Ed17` for the dev key).
 
+### M5 — storage workload (done; replaced the planned AMM)
+
+- Paul replaced the MiniAmm plan with a simpler `StateWriter` contract:
+  `write(start, count)` bumps `count` consecutive mapping slots. Same central
+  -state contention (all senders write one contract's storage trie) with far
+  less machinery, and no token distribution — so `Workload::setup(senders)`
+  was never needed.
+- `setup()` is gone entirely: `Workload::new(kind, config, provider)` is async
+  and deploys, so a workload is ready to produce transactions the moment it
+  exists (no post-setup `Option<Address>`, `next` stays infallible).
+- `--writes` (slots per tx, default 5) and `--key-space` (default 1e6). Wide
+  key space = fresh slots = state growth; narrow = hot-slot contention.
+- `gas.rs` generalized: `contract_call(payload, execution)` implements the
+  EIP-7623 max(standard, floor) rule, and `calldata_to_eoa` is now the
+  zero-execution case of it. `state_writes` is an **upper bound** (23k/slot:
+  fresh slot 22.1k + loop), since a slot's cost depends on whether an earlier
+  tx already wrote it. Verified on anvil: limit 141,368 vs used 132,850 — 6%
+  over-provisioned, and ~22.3k per fresh write as predicted.
+- Contract sources in `contracts/`, artifact committed
+  (`contracts/StateWriter.json`), rebuilt via `just build-contracts`; users
+  never need a Solidity toolchain. Bound via `sol!` from the artifact path.
+- `just e2e-storage` pins `--key-space 1` so every tx bumps slots[0..writes)
+  by exactly one; the recipe asserts `slots[0] == confirmed`. Verified:
+  220/220.
+- Logs now disable ANSI colour when stdout is not a terminal, so recipes can
+  parse them.
+
+### Base-fee saturation finding (2026-08-07, 100 senders on anvil)
+
+Anvil (30M gas limit, 1s blocks) with 100 senders at 300 tps: blocks filled
+completely (~29.9M gas, 226 storage txs/block) and the **base fee rose from
+235M to 675M wei over 8 blocks** — so yes, celox can saturate a chain hard
+enough to move the base fee.
+
+It also exposed a bug: **the 30s fee-quote refresh cannot track a base fee
+that doubles in 8 seconds.** The quote is taken once after funding (base fee
+235M → cap ≈ 536M); once the base fee passed that cap, every submission was
+rejected with "max fee per gas less than block base fee" (100 rejections, one
+per sender) and the 930 already-pending transactions were stranded below the
+base fee until they timed out. Run collapsed to 0 tps: 2035/2965 confirmed.
+
+Fix not yet applied (Paul asked a question, not for a change). Options, in
+order of preference: refresh the quote every ~2s instead of 30s (a 2x cap
+absorbs 12.5%/block growth if re-quoted every couple of blocks); optionally a
+`--fee-multiplier` for saturation runs, noting a bigger cap costs nothing in
+actual fees (EIP-1559 charges base+tip, not the cap) but does inflate the
+funding balance check, which matters on chains with a high floor like Celo
+mainnet's 200 gwei. Stranded *pending* transactions need replace-by-fee,
+still deferred.
+
 ### Lane abstraction (2026-08-07, Paul's idea)
 
 - `lane.rs`: one account's send pipeline — local nonce, bounded in-flight

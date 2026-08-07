@@ -9,6 +9,22 @@ lint:
 build:
     cargo build
 
+# Recompile the Solidity contracts and refresh the committed artifacts, so
+# users never need a Solidity toolchain to build celox.
+build-contracts:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    (cd contracts && forge build)
+    python3 - <<'PY'
+    import json
+    artifact = json.load(open("contracts/out/StateWriter.sol/StateWriter.json"))
+    json.dump(
+        {"abi": artifact["abi"], "bytecode": {"object": artifact["bytecode"]["object"]}},
+        open("contracts/StateWriter.json", "w"),
+        indent=2,
+    )
+    PY
+
 test:
     cargo test
 
@@ -22,6 +38,31 @@ e2e:
     CELOX_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
         cargo run -q -- --rpc-url http://127.0.0.1:18545 \
         --tps 20 --senders 10 --duration 10s
+
+# Storage-workload e2e against a throwaway anvil node. Pins --key-space 1 so
+# every transaction bumps slots[0..writes) by exactly one, making the contract's
+# final slot value equal the number of confirmed transactions.
+e2e-storage:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    RPC=http://127.0.0.1:18549
+    anvil --port 18549 --block-time 1 > /tmp/celox-e2e-storage-anvil.log 2>&1 &
+    trap 'kill $! 2>/dev/null' EXIT
+    sleep 2
+    OUT=$(NO_COLOR=1 CELOX_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
+        cargo run -q -- --rpc-url $RPC \
+        --workload storage --writes 5 --key-space 1 \
+        --tps 20 --senders 10 --duration 10s 2>&1 | tee /dev/stderr)
+    CONTRACT=$(echo "$OUT" | sed -n 's/.*state writer deployed.*contract=\([0-9a-fA-Fx]*\).*/\1/p')
+    CONFIRMED=$(echo "$OUT" | sed -n 's/.*run finished.*confirmed=\([0-9]*\).*/\1/p')
+    # slots[0] is bumped once per transaction, so it must equal the confirmed count.
+    SLOT=$(cast index uint256 0 0)
+    VALUE=$(cast storage --rpc-url $RPC "$CONTRACT" "$SLOT")
+    if [[ $((VALUE)) -ne $CONFIRMED ]]; then
+        echo "ERROR: slots[0] is $((VALUE)) after $CONFIRMED confirmed transactions"
+        exit 1
+    fi
+    echo "OK: slots[0] == $CONFIRMED confirmed transactions (state writes landed)"
 
 # CIP-64 e2e against a celo-reth dev node (chain 1337, built from ../celo-kona).
 # Root = the dev account pre-funded with CELO and the 0x…ce16 fee currency.

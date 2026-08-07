@@ -50,6 +50,15 @@ struct Args {
     #[arg(long, default_value_t = 1024)]
     data_size: usize,
 
+    /// Storage slots each transaction writes, for the `storage` workload
+    #[arg(long, default_value_t = 5)]
+    writes: u64,
+
+    /// Slot range the `storage` workload writes into. A wide range grows the
+    /// state trie; a narrow one contends on hot slots.
+    #[arg(long, default_value_t = 1_000_000)]
+    key_space: u64,
+
     /// Target transactions per second across all senders
     #[arg(long, default_value_t = 10.0)]
     tps: f64,
@@ -87,6 +96,8 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
+        // Colour only a terminal, so piped logs stay machine-readable.
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "celox=info".into()),
@@ -107,6 +118,8 @@ async fn main() -> Result<()> {
         args.data_size <= 128 * 1024,
         "--data-size must be at most 131072 bytes"
     );
+    ensure!(args.writes > 0, "--writes must be at least 1");
+    ensure!(args.key_space > 0, "--key-space must be at least 1");
     let target_balance = parse_ether(&args.fund)?;
 
     // Env only, never argv: a key on the command line leaks into shell
@@ -172,15 +185,19 @@ async fn main() -> Result<()> {
 
     let fees = fees::spawn_refresher(provider.clone(), fee_currency.map(|c| c.token)).await?;
 
-    let mut workload = Workload::new(
-        args.workload,
-        workloads::Config {
-            data_size: args.data_size,
-            fee_currency,
-        },
-    )?;
-    workload.setup(&provider).await?;
-    let workload = Arc::new(workload);
+    let workload = Arc::new(
+        Workload::new(
+            args.workload,
+            workloads::Config {
+                data_size: args.data_size,
+                fee_currency,
+                writes: args.writes,
+                key_space: args.key_space,
+            },
+            &provider,
+        )
+        .await?,
+    );
 
     let pacer = Pacer::start(args.tps);
     let (event_tx, event_rx) = mpsc::unbounded_channel();

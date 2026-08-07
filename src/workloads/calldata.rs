@@ -1,7 +1,7 @@
 use alloy_primitives::{Address, U256};
 use celo_alloy_network::TransactionBuilder;
 use celo_alloy_rpc_types::CeloTransactionRequest;
-use rand::RngCore;
+use rand::Rng;
 
 /// Recipient of every calldata transaction. The address is arbitrary — any
 /// keyless EOA does, and one nobody spends from keeps the payload inert. It is

@@ -55,7 +55,8 @@ is abandoned and its repo is gone.
   p50 0.72s, exit 0. Receipt spot-check: gas limit 0x19136 (102710) for a
   payload with 7 zero and 2041 non-zero bytes, `gasUsed` identical, status 1 —
   the formula is exact.
-- `rand` pinned to 0.9 (0.10 is out; not adopted, no reason to chase it yet).
+- `rand` 0.10, which renamed the core trait `RngCore` to `Rng` and the old `Rng`
+  extension trait to `RngExt`; `rand::rng()` and `fill_bytes` are unchanged.
 
 ## Verification strategy (settled with Paul, 2026-08-07)
 

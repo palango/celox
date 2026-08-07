@@ -32,8 +32,9 @@ test:
 e2e:
     #!/usr/bin/env bash
     set -euo pipefail
+    lsof -ti :18545 >/dev/null 2>&1 && { echo "ERROR: port 18545 is already in use"; exit 1; }
     anvil --port 18545 --block-time 1 &> /tmp/celox-e2e-anvil.log &
-    trap "kill $! 2>/dev/null" EXIT
+    trap "kill $! 2>/dev/null || true" INT TERM EXIT
     sleep 2
     CELOX_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
         cargo run -q -- --rpc-url http://127.0.0.1:18545 \
@@ -46,8 +47,9 @@ e2e-storage:
     #!/usr/bin/env bash
     set -euo pipefail
     RPC=http://127.0.0.1:18549
+    lsof -ti :18549 >/dev/null 2>&1 && { echo "ERROR: port 18549 is already in use"; exit 1; }
     anvil --port 18549 --block-time 1 > /tmp/celox-e2e-storage-anvil.log 2>&1 &
-    trap "kill $! 2>/dev/null" EXIT
+    trap "kill $! 2>/dev/null || true" INT TERM EXIT
     sleep 2
     OUT=$(NO_COLOR=1 CELOX_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
         cargo run -q -- --rpc-url $RPC \
@@ -69,7 +71,7 @@ e2e-storage:
 e2e-cip64:
     #!/usr/bin/env bash
     set -euo pipefail
-    KONA=/Users/paul/Projects/celo-kona
+    KONA="${KONA:-$(dirname "$(pwd)")/celo-kona}"
     CELO_RETH="$KONA/target/debug/celo-reth"
     if [[ ! -x "$CELO_RETH" ]]; then
         cargo build -p celo-reth --manifest-path "$KONA/Cargo.toml"
@@ -77,13 +79,14 @@ e2e-cip64:
     GENESIS="$KONA/e2e_test/celo-dev-genesis.json"
     RPC=http://127.0.0.1:18547
     FC=0x000000000000000000000000000000000000ce16
+    lsof -ti :18547 >/dev/null 2>&1 && { echo "ERROR: port 18547 is already in use"; exit 1; }
     DATADIR=$(mktemp -d)
     LOG=/tmp/celox-e2e-celo-reth.log
     "$CELO_RETH" init --chain "$GENESIS" --datadir "$DATADIR" > "$LOG" 2>&1
     "$CELO_RETH" node --dev --dev.block-time 1s --chain "$GENESIS" --datadir "$DATADIR" \
         --http --http.port 18547 --authrpc.port 18647 --disable-discovery >> "$LOG" 2>&1 &
     NODE_PID=$!
-    trap 'kill $NODE_PID 2>/dev/null; wait $NODE_PID 2>/dev/null; rm -rf "$DATADIR"' EXIT
+    trap 'kill $NODE_PID 2>/dev/null; wait $NODE_PID 2>/dev/null; rm -rf "$DATADIR"; true' INT TERM EXIT
     for _ in $(seq 60); do
         cast block-number --rpc-url $RPC &>/dev/null && break
         sleep 0.5
@@ -97,8 +100,8 @@ e2e-cip64:
     # below the funded target of 1e18.
     SENDER0=0x47d52d00897fBF1AE2de5e650890F2B7eA84Ed17
     BAL=$(cast call --rpc-url $RPC $FC 'balanceOf(address) returns (uint256)' $SENDER0 | awk '{print $1}')
-    if [[ "$BAL" == "1000000000000000000" || "$BAL" == "0" ]]; then
-        echo "ERROR: sender0 fee-currency balance $BAL - gas was not paid in the fee currency"
+    if ! [[ "$BAL" =~ ^[0-9]+$ ]] || [[ $(echo "$BAL > 0 && $BAL < 1000000000000000000" | bc) -ne 1 ]]; then
+        echo "ERROR: sender0 fee-currency balance is '$BAL'; expected 0 < balance < 1e18"
         exit 1
     fi
     echo "OK: sender0 fee-currency balance $BAL (< funded 1e18, gas debited in token)"

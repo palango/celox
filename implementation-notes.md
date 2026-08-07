@@ -191,7 +191,39 @@ invalidated results the first time celox was pointed at a real chain.
     build-contracts` is reproducible; `MAX_WINDOW`'s comment matches the
     warning-only behaviour.
 
-**Accepted, documented rather than changed:** latency percentiles cover
+**Docs/UX pass, fixed after the above** (the reviewer ran everything it claimed,
+including against Celo mainnet read-only):
+
+- **`ETH_RPC_URL` silently retargeted the run** (high). Every Foundry user
+  exports it, so the README's quick start could connect to whatever it names —
+  reproduced hitting Celo mainnet, chain 42220, while the user believed they
+  were on anvil. The env var is now `CELOX_RPC_URL`, and the connect line logs
+  the endpoint alongside the chain id.
+- **No block-gas-limit check.** `--writes 2000` deploys, funds, then fails
+  every transaction with "intrinsic gas too high". celox now asks the workload
+  for a representative transaction and compares its gas limit to the chain's
+  block gas limit before funding — one check that covers every workload.
+- **User errors printed `Location: src/main.rs:…`**, making a typo look like a
+  crash. `main` now prints the message and returns an exit code; `run` carries
+  the logic.
+- **Piping into `head` exited 101** (a Rust SIGPIPE panic), which is neither
+  documented exit code. SIGPIPE is reset to default: now 141.
+- **The status line hid a collapsing run** for the first `--receipt-timeout`,
+  since drops do not exist until then. It now prints `in_flight`.
+- **One WARN per rejected transaction** would bury the status lines at rate; a
+  lane now warns once per rejection episode and re-arms after a success.
+- **e2e recipes could pass against a foreign node** on a taken port
+  (demonstrated), and their bare `kill` in an EXIT trap turned passing runs into
+  failures under bash 3.2. Both fixed, plus `INT TERM` on the traps so
+  `e2e-cip64` stops leaking its reth datadir, a relative celo-kona path instead
+  of a hardcoded one, and a numeric range assertion instead of two string
+  comparisons.
+- Argument-consistency checks moved ahead of the first RPC; `--fund` and
+  `--fund-token` now name the flag when they fail to parse.
+
+**Accepted, documented rather than changed:** flags belonging to another
+workload are still silently ignored (only `--fee-currency` errors); latency
+percentiles cover
 confirmed transactions only (drops waited the full timeout by definition — the
 README now says to read them next to the drop count); a permanently stale fee
 quote fails the run through rejections without naming itself as the cause;

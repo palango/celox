@@ -10,10 +10,10 @@ checking — a transaction that reverts is a failure, not a success.
 
 ## Requirements
 
-Rust, and a chain to point at. [Foundry](https://getfoundry.sh) is needed only
-to run the end-to-end recipes or to recompile the Solidity contracts; the
-compiled artifacts are committed, so a plain `cargo build` needs no Solidity
-toolchain.
+Rust, and a chain to point at. [just](https://github.com/casey/just),
+[Foundry](https://getfoundry.sh) and python3 are needed only for the development
+recipes; the compiled contract artifacts are committed, so a plain `cargo build`
+needs no Solidity toolchain.
 
 ## Quick start
 
@@ -25,7 +25,13 @@ cargo run --release -- --tps 50 --senders 10 --duration 30s
 ```
 
 The key is read from `CELOX_PRIVATE_KEY` only, never a command-line flag, so it
-stays out of shell history and `ps` output.
+stays out of shell history and `ps` output. The endpoint comes from `--rpc-url`
+or `CELOX_RPC_URL`; celox deliberately ignores Foundry's `ETH_RPC_URL` so an
+exported variable cannot silently point a load test at a live chain. Every run
+logs the endpoint and chain id it connected to — check them.
+
+Exit codes: `0` clean, `1` any failure (including a run that sent nothing, or a
+shutdown that could not drain), `130` interrupted.
 
 ## Workloads
 
@@ -33,7 +39,7 @@ stays out of shell history and `ps` output.
 |------------|-------------------------------------------------------|---------------------------|
 | `transfer` | 1-wei native self-transfer (the cheapest baseline)     | —                         |
 | `calldata` | Random calldata to a burner account                    | `--data-size`             |
-| `cip64`    | Self-transfer paying gas in a fee currency (type 0x7b) | `--fee-currency`          |
+| `cip64`    | Self-transfer paying gas in a fee currency (type 0x7b) | `--fee-currency`, `--fund-token` |
 | `storage`  | Writes storage slots in one shared contract            | `--writes`, `--key-space` |
 
 `cip64` requires `--fee-currency <address>`. The address is validated against
@@ -95,7 +101,9 @@ mainnet's is 200 gwei) needs one to two orders of magnitude more, because a node
 reserves `gas_limit × max_fee` for every pending transaction and celox will warn
 if the target cannot cover a full window. `--poll-interval` defaults to 250ms;
 alloy would otherwise poll a remote endpoint every 7 seconds and quantise every
-measured latency to that.
+measured latency to that. Note that polling is celox's own read load on the node
+under test — roughly one `eth_getTransactionReceipt` per in-flight transaction
+per interval — so raise it when measuring a node whose read path you care about.
 
 ## Development
 

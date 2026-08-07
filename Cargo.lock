@@ -1249,6 +1249,7 @@ name = "celox"
 version = "0.1.0"
 dependencies = [
  "alloy-contract",
+ "alloy-eips",
  "alloy-primitives",
  "alloy-provider",
  "alloy-signer-local",
@@ -1259,6 +1260,7 @@ dependencies = [
  "eyre",
  "futures",
  "humantime",
+ "libc",
  "rand 0.10.2",
  "tokio",
  "tracing",

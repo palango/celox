@@ -12,6 +12,7 @@ celo-alloy-rpc-types = { git = "https://github.com/celo-org/celo-kona", rev = "5
 
 # Alloy family pinned to celo-kona's workspace versions to avoid trait-bound skew.
 alloy-contract = "=2.0.5"
+alloy-eips = "=2.0.5"
 alloy-provider = { version = "=2.0.5", features = ["reqwest"] }
 alloy-signer-local = "=2.0.5"
 alloy-primitives = "1.6.0"
@@ -22,6 +23,7 @@ clap = { version = "4", features = ["derive", "env"] }
 eyre = "0.6"
 futures = "0.3"
 humantime = "2"
+libc = "0.2"
 rand = "0.10"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

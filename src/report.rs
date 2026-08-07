@@ -130,6 +130,13 @@ pub fn spawn(mut events: mpsc::UnboundedReceiver<Event>) -> JoinHandle<Summary> 
                     info!(
                         sent = summary.sent,
                         confirmed = summary.confirmed,
+                        // Everything sent but not yet resolved. A run that is
+                        // outrunning the chain shows this climbing long before
+                        // the receipt timeout turns it into drops.
+                        in_flight = summary.sent
+                            - summary.confirmed
+                            - summary.reverted
+                            - summary.dropped,
                         reverted = summary.reverted,
                         dropped = summary.dropped,
                         rejected = summary.rejected,

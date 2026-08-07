@@ -19,7 +19,7 @@ use alloy_provider::{Provider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
 use celo_alloy_network::{Celo, EthereumWallet};
 use clap::Parser;
-use eyre::{Result, ensure};
+use eyre::{Result, WrapErr, ensure};
 use futures::future::join_all;
 use tokio::sync::{mpsc, watch};
 use tracing::{info, warn};
@@ -39,7 +39,7 @@ use crate::{
 )]
 struct Args {
     /// JSON-RPC endpoint of the target chain
-    #[arg(long, env = "ETH_RPC_URL", default_value = "http://127.0.0.1:8545")]
+    #[arg(long, env = "CELOX_RPC_URL", default_value = "http://127.0.0.1:8545")]
     rpc_url: String,
 
     /// Workload to generate
@@ -100,7 +100,11 @@ struct Args {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> std::process::ExitCode {
+    // Rust masks SIGPIPE, so piping celox into `head` would kill it with a
+    // panic and exit 101 — neither of the codes this tool documents.
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+
     tracing_subscriber::fmt()
         // Colour only a terminal, so piped logs stay machine-readable.
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
@@ -110,6 +114,19 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    match run().await {
+        Ok(code) => std::process::ExitCode::from(code),
+        Err(error) => {
+            // Just the message: eyre's default handler would add a source
+            // location, which makes a user's typo look like a crash, and the
+            // alternate form repeats causes that already print their own.
+            eprintln!("Error: {error}");
+            std::process::ExitCode::from(1)
+        }
+    }
+}
+
+async fn run() -> Result<u8> {
     let args = Args::parse();
     // The upper bound keeps 1/tps a representable interval; the pacer loses
     // ticks well below it anyway (see implementation-notes.md).
@@ -139,7 +156,20 @@ async fn main() -> Result<()> {
         "--writes must be between 1 and 10000"
     );
     ensure!(args.key_space > 0, "--key-space must be at least 1");
-    let target_balance = parse_ether(&args.fund)?;
+    ensure!(
+        args.workload == WorkloadKind::Cip64 || args.fee_currency.is_none(),
+        "--fee-currency only applies to the cip64 workload"
+    );
+    ensure!(
+        args.workload != WorkloadKind::Cip64 || args.fee_currency.is_some(),
+        "the cip64 workload needs --fee-currency"
+    );
+    // Parsed here rather than where it is used, so a typo fails immediately
+    // instead of only on the workload that happens to read it.
+    let target_balance = parse_ether(&args.fund).wrap_err("--fund is not a valid amount")?;
+    // Syntax-checked here so a typo fails immediately rather than only on the
+    // workload that reads it; the token's real decimals are not known yet.
+    parse_units(&args.fund_token, 18).wrap_err("--fund-token is not a valid amount")?;
 
     // Env only, never argv: a key on the command line leaks into shell
     // history and ps output.
@@ -171,17 +201,13 @@ async fn main() -> Result<()> {
     // transactions as dropped.
     provider.client().set_poll_interval(args.poll_interval);
     let chain_id = provider.get_chain_id().await?;
-    info!(root = %root_address, chain_id, "connected");
+    info!(rpc = %args.rpc_url, root = %root_address, chain_id, "connected");
 
     // The workload's fee currency, validated against the chain's directory.
     // Resolved before funding because the funder's token leg depends on it.
-    let fee_currency = match (args.workload, args.fee_currency) {
-        (WorkloadKind::Cip64, Some(token)) => Some(celo::fee_currency(&provider, token).await?),
-        (WorkloadKind::Cip64, None) => {
-            eyre::bail!("the cip64 workload needs --fee-currency")
-        }
-        (_, Some(_)) => eyre::bail!("--fee-currency only applies to the cip64 workload"),
-        (_, None) => None,
+    let fee_currency = match args.fee_currency {
+        Some(token) => Some(celo::fee_currency(&provider, token).await?),
+        None => None,
     };
 
     // The funder's own transactions always pay native fees, so it gets a
@@ -212,6 +238,25 @@ async fn main() -> Result<()> {
             &provider,
         )
         .await?,
+    );
+
+    // Ask the workload for a representative transaction: if its gas limit
+    // exceeds the block gas limit every send would be rejected, so fail before
+    // funding rather than after paying for it.
+    let workload_gas = workload
+        .next(root_address)
+        .inner
+        .as_ref()
+        .gas
+        .unwrap_or_default();
+    let block_gas_limit = provider
+        .get_block_by_number(alloy_eips::BlockNumberOrTag::Latest)
+        .await?
+        .map(|block| block.header.gas_limit)
+        .unwrap_or(u64::MAX);
+    ensure!(
+        workload_gas <= block_gas_limit,
+        "this workload needs {workload_gas} gas per transaction but the chain's block gas limit is {block_gas_limit}"
     );
 
     funder::top_up(
@@ -305,14 +350,13 @@ async fn main() -> Result<()> {
         }
         Err(_elapsed) => {
             warn!("drain deadline exceeded, abandoning stuck senders");
-            std::process::exit(1);
+            return Ok(1);
         }
     }
     let summary = reporter.await?;
-    let exit_code = if sender_failed {
+    Ok(if sender_failed {
         1
     } else {
-        summary.exit_code()
-    };
-    std::process::exit(exit_code);
+        summary.exit_code() as u8
+    })
 }

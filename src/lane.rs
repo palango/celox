@@ -52,6 +52,10 @@ pub struct Lane {
     window: usize,
     receipt_timeout: Duration,
     in_flight: FuturesUnordered<ReceiptWait>,
+    /// Rejections since the last accepted submission. A systemic rejection —
+    /// an underpriced fee, an underfunded account — hits every transaction, so
+    /// only the first of a run is worth a warning.
+    rejection_streak: u32,
 }
 
 impl Lane {
@@ -70,6 +74,7 @@ impl Lane {
             window,
             receipt_timeout,
             in_flight: FuturesUnordered::new(),
+            rejection_streak: 0,
         })
     }
 
@@ -105,15 +110,16 @@ impl Lane {
         let pending = match sent {
             Ok(Ok(pending)) => pending,
             Ok(Err(error)) => {
-                warn!(account = %self.account, %error, "transaction rejected");
+                self.note_rejection(format_args!("transaction rejected: {error}"));
                 return Submitted::Rejected;
             }
             Err(_elapsed) => {
-                warn!(account = %self.account, "submission timed out");
+                self.note_rejection(format_args!("submission timed out"));
                 return Submitted::Rejected;
             }
         };
         self.nonce += 1;
+        self.rejection_streak = 0;
 
         let receipt_timeout = self.receipt_timeout;
         let hash = *pending.tx_hash();
@@ -140,6 +146,15 @@ impl Lane {
             .boxed(),
         );
         Submitted::Sent
+    }
+
+    fn note_rejection(&mut self, reason: std::fmt::Arguments<'_>) {
+        if self.rejection_streak == 0 {
+            warn!(account = %self.account, "{reason}");
+        } else {
+            debug!(account = %self.account, streak = self.rejection_streak, "{reason}");
+        }
+        self.rejection_streak += 1;
     }
 
     /// Awaits the next completed transaction. Stays pending forever when the

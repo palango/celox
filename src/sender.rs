@@ -1,4 +1,5 @@
 use std::{
+    future::IntoFuture,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -29,6 +30,11 @@ pub struct FeeQuote {
 /// Receipt wait result: latency plus `Some(status)`, or `None` when no receipt
 /// arrived within the timeout.
 type ReceiptWait = BoxFuture<'static, (Duration, Option<bool>)>;
+
+/// Bound on every submission and nonce RPC. Without it a connection that
+/// accepts a request but never answers blocks the sender loop outside its
+/// `select!`, where the stop signal cannot reach it.
+const RPC_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// One spamming account: owns its key (via the provider's wallet), a local
 /// nonce counter, and a bounded window of in-flight transactions.
@@ -139,10 +145,16 @@ impl Sender {
             .with_chain_id(self.chain_id);
 
         let started = Instant::now();
-        let pending = match self.provider.send_transaction(request).await {
-            Ok(pending) => pending,
-            Err(error) => {
+        let sent = tokio::time::timeout(RPC_TIMEOUT, self.provider.send_transaction(request)).await;
+        let pending = match sent {
+            Ok(Ok(pending)) => pending,
+            Ok(Err(error)) => {
                 warn!(sender = %self.address, %error, "transaction rejected");
+                self.report(Event::Done(Outcome::Rejected));
+                return None;
+            }
+            Err(_elapsed) => {
+                warn!(sender = %self.address, "submission timed out");
                 self.report(Event::Done(Outcome::Rejected));
                 return None;
             }
@@ -183,11 +195,8 @@ impl Sender {
     }
 
     async fn fetch_pending_nonce(&self) -> eyre::Result<u64> {
-        Ok(self
-            .provider
-            .get_transaction_count(self.address)
-            .pending()
-            .await?)
+        let fetch = self.provider.get_transaction_count(self.address).pending();
+        Ok(tokio::time::timeout(RPC_TIMEOUT, fetch.into_future()).await??)
     }
 }
 

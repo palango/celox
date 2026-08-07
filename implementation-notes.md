@@ -58,6 +58,19 @@ is abandoned and its repo is gone.
 - `rand` 0.10, which renamed the core trait `RngCore` to `Rng` and the old `Rng`
   extension trait to `RngExt`; `rand::rng()` and `fill_bytes` are unchanged.
 
+### Codex review of M2 (2026-08-07)
+
+- Fixed: senders bound every submission/nonce RPC with a 10s `RPC_TIMEOUT`
+  (a silently hanging RPC could block the loop outside `select!`, deafening
+  it to stop); main backstops the drain with `receipt_timeout + 15s` and
+  exits 1 instead of hanging CI; `--tps` capped at 10k (beyond that the
+  refill interval rounds to zero and panicked inside the detached task).
+- Open with Paul: whether `--private-key` should remain a flag (argv/history
+  exposure; env var `CELOX_PRIVATE_KEY` is the safe route).
+- Deferred: behavioral tests for sender/funder failure paths via alloy's
+  mock-transport `Asserter` — proposed as standalone task, not milestone
+  filler.
+
 ## Verification strategy (settled with Paul, 2026-08-07)
 
 - **anvil** for all non-CIP-64 work (M1–M3, M5 native mode): standard EIP-1559

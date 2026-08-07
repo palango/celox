@@ -78,7 +78,12 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
-    ensure!(args.tps > 0.0, "--tps must be positive");
+    // The upper bound keeps 1/tps a representable interval; the pacer loses
+    // ticks well below it anyway (see implementation-notes.md).
+    ensure!(
+        args.tps > 0.0 && args.tps <= 10_000.0,
+        "--tps must be between 0 and 10000"
+    );
     ensure!(args.senders > 0, "--senders must be at least 1");
     ensure!(args.window > 0, "--window must be at least 1");
     let target_balance = parse_ether(&args.fund)?;
@@ -160,18 +165,30 @@ async fn main() -> Result<()> {
     // refactor of that binding skip the summary.
     let _ = stop_tx.send(true);
 
+    // Every sender RPC is individually bounded, so the drain finishes within
+    // one receipt timeout plus slack; the deadline is a backstop that turns a
+    // wedged shutdown into a failed run instead of a hung CI job.
+    let drain_deadline = args.receipt_timeout + Duration::from_secs(15);
     let mut sender_failed = false;
-    for result in join_all(tasks).await {
-        match result {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                warn!(%error, "sender failed");
-                sender_failed = true;
+    match tokio::time::timeout(drain_deadline, join_all(tasks)).await {
+        Ok(results) => {
+            for result in results {
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        warn!(%error, "sender failed");
+                        sender_failed = true;
+                    }
+                    Err(error) => {
+                        warn!(%error, "sender task panicked");
+                        sender_failed = true;
+                    }
+                }
             }
-            Err(error) => {
-                warn!(%error, "sender task panicked");
-                sender_failed = true;
-            }
+        }
+        Err(_elapsed) => {
+            warn!("drain deadline exceeded, abandoning stuck senders");
+            std::process::exit(1);
         }
     }
     let summary = reporter.await?;

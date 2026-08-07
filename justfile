@@ -21,7 +21,7 @@ e2e:
     sleep 2
     CELOX_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
         cargo run -q -- --rpc-url http://127.0.0.1:18545 \
-        --tps 20 --senders 5 --duration 10s
+        --tps 20 --senders 10 --duration 10s
 
 # CIP-64 e2e against a celo-reth dev node (chain 1337, built from ../celo-kona).
 # Root = the dev account pre-funded with CELO and the 0x…ce16 fee currency.
@@ -50,7 +50,7 @@ e2e-cip64:
     CELOX_PRIVATE_KEY=0x2771aff413cac48d9f8c114fabddd9195a2129f3c2c436caa07e27bb7f58ead5 \
         cargo run -q -- --rpc-url $RPC \
         --workload cip64 --fee-currency $FC \
-        --tps 10 --senders 5 --duration 10s
+        --tps 10 --senders 10 --duration 10s
     # Sender 0 derives deterministically from the dev key, so its address is
     # stable. Gas paid in the fee currency must have debited its token balance
     # below the funded target of 1e18.

@@ -4,7 +4,12 @@
 //! below, and arms in `setup`/`next`; a workload with a CLI knob also gets a
 //! field on `Config`. `next` must set everything the workload knows (to, value,
 //! input, gas limit); the sender loop fills in the account fields (from, nonce,
-//! fees, chain id).
+//! fees).
+//!
+//! Chain facts that another subsystem also needs (the cip64 fee currency: the
+//! funder's token leg depends on it) are resolved once by main and passed in
+//! `Config`. Facts only the workload itself needs (a deployed contract's
+//! address) are resolved by the workload in `setup()`.
 
 mod calldata;
 mod cip64;

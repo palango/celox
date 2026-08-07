@@ -5,17 +5,22 @@ use alloy_primitives::{
     utils::{format_ether, format_units},
 };
 use alloy_provider::{DynProvider, Provider};
-use celo_alloy_network::{Celo, ReceiptResponse, TransactionBuilder};
+use celo_alloy_network::{Celo, ReceiptResponse};
 use celo_alloy_rpc_types::CeloTransactionRequest;
 use eyre::{Result, WrapErr, ensure};
 use futures::future::try_join_all;
 use tracing::info;
 
-use crate::{celo, gas, sender::FeeQuote};
+use crate::{celo, fees::FeeQuote, gas};
 
 /// Upper bound for one ERC-20 `transfer`, not an exact price: the cost depends
 /// on whether the recipient's balance slot is fresh. Unused gas is refunded.
 const ERC20_TRANSFER_GAS: u64 = 100_000;
+
+/// How many funding transactions go out before awaiting their receipts. Nodes
+/// cap pending transactions per account (reth: 16), so the root cannot have a
+/// whole large fleet's funding in flight at once.
+const FUNDING_BATCH: usize = 10;
 
 /// The fee-currency leg of funding: senders paying gas in `token` get topped
 /// up to `target` of it. `decimals` is only for display.
@@ -39,7 +44,6 @@ pub async fn top_up(
     native_target: U256,
     token_leg: Option<&TokenLeg>,
     fees: FeeQuote,
-    chain_id: u64,
 ) -> Result<()> {
     let root_native = provider.get_balance(root).await?;
     let root_token = match token_leg {
@@ -92,31 +96,40 @@ pub async fn top_up(
         return Ok(());
     }
 
-    let mut nonce = provider.get_transaction_count(root).pending().await?;
-    let mut pending = Vec::with_capacity(native_shortfalls.len() + token_shortfalls.len());
+    let mut requests = Vec::with_capacity(native_shortfalls.len() + token_shortfalls.len());
     for (address, amount) in &native_shortfalls {
-        let request = CeloTransactionRequest::default()
-            .to(*address)
-            .value(*amount)
-            .gas_limit(gas::TRANSFER);
-        pending.push(send(provider, request, root, &mut nonce, fees, chain_id).await?);
+        requests.push(
+            CeloTransactionRequest::default()
+                .to(*address)
+                .value(*amount)
+                .gas_limit(gas::TRANSFER),
+        );
     }
     if let Some(leg) = token_leg {
         for (address, amount) in &token_shortfalls {
-            let request = celo::erc20_transfer(provider, leg.token, *address, *amount)
-                .gas_limit(ERC20_TRANSFER_GAS);
-            pending.push(send(provider, request, root, &mut nonce, fees, chain_id).await?);
+            requests.push(
+                celo::erc20_transfer(provider, leg.token, *address, *amount)
+                    .gas_limit(ERC20_TRANSFER_GAS),
+            );
         }
     }
-    for wait in pending {
-        let receipt = tokio::time::timeout(Duration::from_secs(30), wait.get_receipt())
-            .await
-            .wrap_err("timed out waiting for a funding receipt")??;
-        ensure!(
-            receipt.status(),
-            "funding transaction {} reverted",
-            receipt.transaction_hash()
-        );
+
+    let mut nonce = provider.get_transaction_count(root).pending().await?;
+    for batch in requests.chunks(FUNDING_BATCH) {
+        let mut pending = Vec::with_capacity(batch.len());
+        for request in batch {
+            pending.push(send(provider, request.clone(), root, &mut nonce, fees).await?);
+        }
+        for wait in pending {
+            let receipt = tokio::time::timeout(Duration::from_secs(30), wait.get_receipt())
+                .await
+                .wrap_err("timed out waiting for a funding receipt")??;
+            ensure!(
+                receipt.status(),
+                "funding transaction {} reverted",
+                receipt.transaction_hash()
+            );
+        }
     }
     info!(
         native = native_shortfalls.len(),
@@ -169,14 +182,13 @@ async fn send(
     root: Address,
     nonce: &mut u64,
     fees: FeeQuote,
-    chain_id: u64,
 ) -> Result<alloy_provider::PendingTransactionBuilder<Celo>> {
+    // Chain id is left to the provider's cached ChainIdFiller.
     let request = request
         .from(root)
         .nonce(*nonce)
         .max_fee_per_gas(fees.max_fee)
-        .max_priority_fee_per_gas(fees.tip)
-        .with_chain_id(chain_id);
+        .max_priority_fee_per_gas(fees.tip);
     *nonce += 1;
     Ok(provider.send_transaction(request).await?)
 }

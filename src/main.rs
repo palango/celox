@@ -1,4 +1,5 @@
 mod celo;
+mod fees;
 mod funder;
 mod gas;
 mod keys;
@@ -10,10 +11,10 @@ mod workloads;
 use std::{sync::Arc, time::Duration};
 
 use alloy_primitives::{
-    Address, U256,
+    Address,
     utils::{parse_ether, parse_units},
 };
-use alloy_provider::{DynProvider, Provider, ProviderBuilder};
+use alloy_provider::{Provider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
 use celo_alloy_network::{Celo, EthereumWallet};
 use clap::Parser;
@@ -24,7 +25,7 @@ use tracing::{info, warn};
 
 use crate::{
     pacer::Pacer,
-    sender::{FeeQuote, Sender},
+    sender::Sender,
     workloads::{Workload, WorkloadKind},
 };
 
@@ -115,14 +116,29 @@ async fn main() -> Result<()> {
         .parse()
         .map_err(|_| eyre::eyre!("CELOX_PRIVATE_KEY is not a valid private key"))?;
     let root_address = root_signer.address();
-    let root = connect(&args.rpc_url, root_signer.clone()).await?;
-    let chain_id = root.get_chain_id().await?;
+    let sender_signers: Vec<PrivateKeySigner> = (0..args.senders)
+        .map(|index| keys::derive_sender(&root_signer, index))
+        .collect::<Result<_>>()?;
+
+    // One provider (and HTTP connection pool) for the whole run: the wallet
+    // holds every sender key and signs by the request's `from` field, and
+    // DynProvider clones are cheap Arc handles.
+    let mut wallet = EthereumWallet::new(root_signer);
+    for signer in &sender_signers {
+        wallet.register_signer(signer.clone());
+    }
+    let provider = ProviderBuilder::new_with_network::<Celo>()
+        .wallet(wallet)
+        .connect(&args.rpc_url)
+        .await?
+        .erased();
+    let chain_id = provider.get_chain_id().await?;
     info!(root = %root_address, chain_id, "connected");
 
     // The workload's fee currency, validated against the chain's directory.
     // Resolved before funding because the funder's token leg depends on it.
     let fee_currency = match (args.workload, args.fee_currency) {
-        (WorkloadKind::Cip64, Some(token)) => Some(celo::fee_currency(&root, token).await?),
+        (WorkloadKind::Cip64, Some(token)) => Some(celo::fee_currency(&provider, token).await?),
         (WorkloadKind::Cip64, None) => {
             eyre::bail!("the cip64 workload needs --fee-currency")
         }
@@ -133,10 +149,7 @@ async fn main() -> Result<()> {
     // The funder's own transactions always pay native fees, so it gets a
     // one-shot native quote; the senders' refreshed quote below is denominated
     // in the workload's fee currency when one is set.
-    let native_fees = native_quote(&root).await?;
-    let sender_signers: Vec<PrivateKeySigner> = (0..args.senders)
-        .map(|index| keys::derive_sender(&root_signer, index))
-        .collect::<Result<_>>()?;
+    let native_fees = fees::native_quote(&provider).await?;
     let sender_addresses: Vec<_> = sender_signers.iter().map(|s| s.address()).collect();
     let token_leg = match fee_currency {
         Some(currency) => Some(funder::TokenLeg {
@@ -147,17 +160,16 @@ async fn main() -> Result<()> {
         None => None,
     };
     funder::top_up(
-        &root,
+        &provider,
         root_address,
         &sender_addresses,
         target_balance,
         token_leg.as_ref(),
         native_fees,
-        chain_id,
     )
     .await?;
 
-    let fees = spawn_fee_refresher(root.clone(), fee_currency.map(|c| c.token)).await?;
+    let fees = fees::spawn_refresher(provider.clone(), fee_currency.map(|c| c.token)).await?;
 
     let mut workload = Workload::new(
         args.workload,
@@ -166,7 +178,7 @@ async fn main() -> Result<()> {
             fee_currency,
         },
     )?;
-    workload.setup(&root).await?;
+    workload.setup(&provider).await?;
     let workload = Arc::new(workload);
 
     let pacer = Pacer::start(args.tps);
@@ -178,9 +190,8 @@ async fn main() -> Result<()> {
     for signer in sender_signers {
         let address = signer.address();
         let sender = Sender {
-            provider: connect(&args.rpc_url, signer).await?,
+            provider: provider.clone(),
             address,
-            chain_id,
             window: args.window,
             receipt_timeout: args.receipt_timeout,
             workload: Arc::clone(&workload),
@@ -248,71 +259,4 @@ async fn main() -> Result<()> {
         summary.exit_code()
     };
     std::process::exit(exit_code);
-}
-
-async fn connect(rpc_url: &str, signer: PrivateKeySigner) -> Result<DynProvider<Celo>> {
-    let provider = ProviderBuilder::new_with_network::<Celo>()
-        .wallet(EthereumWallet::new(signer))
-        .connect(rpc_url)
-        .await?;
-    Ok(provider.erased())
-}
-
-/// Fetches an initial fee quote and keeps refreshing it every 30s. With a fee
-/// currency the quote is denominated in that currency; otherwise in wei.
-async fn spawn_fee_refresher(
-    provider: DynProvider<Celo>,
-    fee_currency: Option<Address>,
-) -> Result<watch::Receiver<FeeQuote>> {
-    let (tx, rx) = watch::channel(quote(&provider, fee_currency).await?);
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_secs(30));
-        tick.tick().await; // the first tick fires immediately; skip it
-        loop {
-            tick.tick().await;
-            match quote(&provider, fee_currency).await {
-                Ok(fresh) => {
-                    let _ = tx.send(fresh);
-                }
-                Err(error) => warn!(%error, "fee refresh failed, keeping previous quote"),
-            }
-        }
-    });
-    Ok(rx)
-}
-
-async fn quote(provider: &DynProvider<Celo>, fee_currency: Option<Address>) -> Result<FeeQuote> {
-    match fee_currency {
-        None => native_quote(provider).await,
-        Some(token) => cip64_quote(provider, token).await,
-    }
-}
-
-/// Native EIP-1559 estimate; also used one-shot for the funder's transactions.
-async fn native_quote(provider: &DynProvider<Celo>) -> Result<FeeQuote> {
-    let estimate = provider.estimate_eip1559_fees().await?;
-    Ok(FeeQuote {
-        max_fee: estimate.max_fee_per_gas,
-        tip: estimate.max_priority_fee_per_gas,
-    })
-}
-
-/// Fee-currency-denominated quote from Celo's parameterized gas price RPCs,
-/// with the same fee cap formula as celo-alloy's CeloGasFiller: room for the
-/// base fee to double, preserving the tip.
-async fn cip64_quote(provider: &DynProvider<Celo>, token: Address) -> Result<FeeQuote> {
-    let gas_price: U256 = provider
-        .raw_request("eth_gasPrice".into(), (token,))
-        .await?;
-    let tip: U256 = provider
-        .raw_request("eth_maxPriorityFeePerGas".into(), (token,))
-        .await?;
-    let gas_price = u128::try_from(gas_price)?;
-    let tip = u128::try_from(tip)?;
-    let max_fee = if gas_price > tip {
-        2 * (gas_price - tip) + tip
-    } else {
-        (2 * gas_price).max(tip)
-    };
-    Ok(FeeQuote { max_fee, tip })
 }

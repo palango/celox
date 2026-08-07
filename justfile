@@ -42,7 +42,7 @@ e2e-cip64:
     "$CELO_RETH" node --dev --dev.block-time 1s --chain "$GENESIS" --datadir "$DATADIR" \
         --http --http.port 18547 --authrpc.port 18647 --disable-discovery >> "$LOG" 2>&1 &
     NODE_PID=$!
-    trap 'kill $NODE_PID 2>/dev/null; rm -rf "$DATADIR"' EXIT
+    trap 'kill $NODE_PID 2>/dev/null; wait $NODE_PID 2>/dev/null; rm -rf "$DATADIR"' EXIT
     for _ in $(seq 60); do
         cast block-number --rpc-url $RPC &>/dev/null && break
         sleep 0.5

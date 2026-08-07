@@ -6,7 +6,7 @@ use std::{
 
 use alloy_primitives::Address;
 use alloy_provider::{DynProvider, Provider};
-use celo_alloy_network::{Celo, ReceiptResponse, TransactionBuilder};
+use celo_alloy_network::{Celo, ReceiptResponse};
 use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesOrdered};
 use tokio::{
     sync::{mpsc, watch},
@@ -15,17 +15,11 @@ use tokio::{
 use tracing::{debug, warn};
 
 use crate::{
+    fees::FeeQuote,
     pacer::Pacer,
     report::{Event, Outcome},
     workloads::Workload,
 };
-
-/// Fee suggestion shared by all senders, refreshed periodically in the background.
-#[derive(Clone, Copy, Debug)]
-pub struct FeeQuote {
-    pub max_fee: u128,
-    pub tip: u128,
-}
 
 /// Receipt wait result: latency plus `Some(status)`, or `None` when no receipt
 /// arrived within the timeout.
@@ -43,7 +37,6 @@ pub const RPC_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct Sender {
     pub provider: DynProvider<Celo>,
     pub address: Address,
-    pub chain_id: u64,
     pub window: usize,
     pub receipt_timeout: Duration,
     pub workload: Arc<Workload>,
@@ -137,14 +130,15 @@ impl Sender {
     /// node rejected it.
     async fn send_one(&self, nonce: u64) -> Option<ReceiptWait> {
         let quote = *self.fees.borrow();
+        // Chain id is left to the provider's ChainIdFiller, which caches it
+        // after one fetch; everything else is preset so no filler does RPC.
         let request = self
             .workload
             .next(self.address)
             .from(self.address)
             .nonce(nonce)
             .max_fee_per_gas(quote.max_fee)
-            .max_priority_fee_per_gas(quote.tip)
-            .with_chain_id(self.chain_id);
+            .max_priority_fee_per_gas(quote.tip);
 
         let started = Instant::now();
         let sent = tokio::time::timeout(RPC_TIMEOUT, self.provider.send_transaction(request)).await;

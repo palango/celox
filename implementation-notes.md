@@ -112,6 +112,39 @@ is abandoned and its repo is gone.
   the funded 1e18 — gas debited in the token. Sender0's address is stable
   because derivation is deterministic (`0x47d5…Ed17` for the dev key).
 
+### Lane abstraction (2026-08-07, Paul's idea)
+
+- `lane.rs`: one account's send pipeline — local nonce, bounded in-flight
+  window (`FuturesOrdered`), `submit`/`resync`/`next_completed`. The sender
+  drives one lane through its paced `select!` loop (structure and `step` truth
+  table unchanged, cancel-safety preserved); the funder pipelines the root's
+  funding through one lane instead of fixed `chunks(10)` batching. Removes the
+  duplicated account-field fill chain and the two copies of the pool-cap
+  number — now `lane::MAX_WINDOW = 16` in one place, used as the funder window
+  and (soon) the senders' upper bound. `next_completed` stays pending on an
+  empty window so it is select-safe without a busy loop. `RPC_TIMEOUT` moved
+  here; main's drain deadline references `lane::RPC_TIMEOUT`.
+- The funder's failure semantics improved as a side effect: a rejected or
+  dropped funding tx now fails fast with a specific message instead of a
+  post-hoc receipt scan.
+
+### Post-M4 refactor round (2026-08-07, Paul approved "apply all")
+
+- Applied: `fees.rs` (quote logic + saturating, unit-tested cap formula);
+  shared provider/wallet (one HTTP pool, `register_signer` per sender, wallet
+  signs by `from`); chain id via cached ChainIdFiller; Config-vs-setup rule
+  in the workloads doc; funder batches sends (`FUNDING_BATCH = 10`) after
+  10-sender funding hit reth's 16-pending-per-account cap ("txpool is full").
+- **Deviation from the approved set:** making `cip64_max_fee` pub on the
+  celo-kona PR branch is deferred until PR 266 merges. Consuming it requires
+  pushing that branch (which also carries Paul's unpushed test commit
+  `2b9e5ce` — his call, not mine) and bumping celox's pin; the drift risk it
+  addressed is meanwhile covered by fees.rs matching upstream's saturating
+  arithmetic with a unit test. Revisit at the pin bump.
+- Architecture review verdicts on record: skip orchestrator module, sender
+  context split, Funder struct; M5 needs `setup(root, senders)` since Paul
+  chose real-ERC-20-balance AMM swaps.
+
 ## Verification strategy (settled with Paul, 2026-08-07)
 
 - **anvil** for all non-CIP-64 work (M1–M3, M5 native mode): standard EIP-1559

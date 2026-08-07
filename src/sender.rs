@@ -1,39 +1,23 @@
-use std::{
-    future::IntoFuture,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{sync::Arc, time::Duration};
 
 use alloy_primitives::Address;
-use alloy_provider::{DynProvider, Provider};
-use celo_alloy_network::{Celo, ReceiptResponse};
-use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesOrdered};
+use alloy_provider::DynProvider;
+use celo_alloy_network::Celo;
 use tokio::{
     sync::{mpsc, watch},
     task::JoinHandle,
 };
-use tracing::{debug, warn};
+use tracing::warn;
 
 use crate::{
     fees::FeeQuote,
+    lane::{Lane, Submitted},
     pacer::Pacer,
     report::{Event, Outcome},
     workloads::Workload,
 };
 
-/// Receipt wait result: latency plus `Some(status)`, or `None` when no receipt
-/// arrived within the timeout.
-type ReceiptWait = BoxFuture<'static, (Duration, Option<bool>)>;
-
-/// Bound on every submission and nonce RPC. Without it a connection that
-/// accepts a request but never answers blocks the sender loop outside its
-/// `select!`, where the stop signal cannot reach it. Public because main's
-/// drain deadline must exceed `receipt_timeout + RPC_TIMEOUT`, the worst
-/// legitimate drain.
-pub const RPC_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// One spamming account: owns its key (via the provider's wallet), a local
-/// nonce counter, and a bounded window of in-flight transactions.
+/// One spamming account: a workload-driven, paced producer for its own [`Lane`].
 pub struct Sender {
     pub provider: DynProvider<Celo>,
     pub address: Address,
@@ -76,28 +60,26 @@ impl Sender {
     }
 
     async fn run(mut self) -> eyre::Result<()> {
-        let mut nonce = self.fetch_pending_nonce().await.map_err(|error| {
-            eyre::eyre!(
-                "sender {}: initial nonce fetch failed: {error}",
-                self.address
-            )
-        })?;
+        let mut lane = Lane::open(
+            self.provider.clone(),
+            self.address,
+            self.window,
+            self.receipt_timeout,
+        )
+        .await
+        .map_err(|error| eyre::eyre!("sender {}: {error}", self.address))?;
+
         // Set when a transaction is dropped or rejected: the on-chain nonce is
         // then unknown, so stop sending, let the window drain, and refetch.
         let mut need_resync = false;
-        let mut in_flight: FuturesOrdered<ReceiptWait> = FuturesOrdered::new();
 
         loop {
             let stopped = *self.stop.borrow();
-            let step = step(stopped, need_resync, in_flight.len(), self.window);
+            let step = step(stopped, need_resync, lane.in_flight(), self.window);
             match step {
                 Step::Finish => break,
-                Step::Resync => match self.fetch_pending_nonce().await {
-                    Ok(fresh) => {
-                        debug!(sender = %self.address, nonce = fresh, "nonce resynced");
-                        nonce = fresh;
-                        need_resync = false;
-                    }
+                Step::Resync => match lane.resync().await {
+                    Ok(()) => need_resync = false,
                     Err(error) => {
                         warn!(sender = %self.address, %error, "nonce resync failed, retrying");
                         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -107,16 +89,19 @@ impl Sender {
                     tokio::select! {
                         biased;
                         _ = self.stop.changed(), if !stopped => {}
-                        Some((latency, status)) = in_flight.next() => {
+                        (latency, status) = lane.next_completed() => {
                             need_resync |= self.record(latency, status);
                         }
                         _ = self.pacer.acquire(), if step == Step::Send => {
-                            match self.send_one(nonce).await {
-                                Some(wait) => {
-                                    nonce += 1;
-                                    in_flight.push_back(wait);
+                            let request = self.workload.next(self.address);
+                            // Copy the quote out before awaiting; the guard is not Send.
+                            let fees = *self.fees.borrow();
+                            match lane.submit(request, fees).await {
+                                Submitted::Sent => self.report(Event::Sent),
+                                Submitted::Rejected => {
+                                    self.report(Event::Done(Outcome::Rejected));
+                                    need_resync = true;
                                 }
-                                None => need_resync = true,
                             }
                         }
                     }
@@ -124,54 +109,6 @@ impl Sender {
             }
         }
         Ok(())
-    }
-
-    /// Submits one transaction; returns the receipt wait, or `None` if the
-    /// node rejected it.
-    async fn send_one(&self, nonce: u64) -> Option<ReceiptWait> {
-        let quote = *self.fees.borrow();
-        // Chain id is left to the provider's ChainIdFiller, which caches it
-        // after one fetch; everything else is preset so no filler does RPC.
-        let request = self
-            .workload
-            .next(self.address)
-            .from(self.address)
-            .nonce(nonce)
-            .max_fee_per_gas(quote.max_fee)
-            .max_priority_fee_per_gas(quote.tip);
-
-        let started = Instant::now();
-        let sent = tokio::time::timeout(RPC_TIMEOUT, self.provider.send_transaction(request)).await;
-        let pending = match sent {
-            Ok(Ok(pending)) => pending,
-            Ok(Err(error)) => {
-                warn!(sender = %self.address, %error, "transaction rejected");
-                self.report(Event::Done(Outcome::Rejected));
-                return None;
-            }
-            Err(_elapsed) => {
-                warn!(sender = %self.address, "submission timed out");
-                self.report(Event::Done(Outcome::Rejected));
-                return None;
-            }
-        };
-        self.report(Event::Sent);
-
-        let timeout = self.receipt_timeout;
-        Some(
-            async move {
-                let status = match tokio::time::timeout(timeout, pending.get_receipt()).await {
-                    Ok(Ok(receipt)) => Some(receipt.status()),
-                    Ok(Err(error)) => {
-                        debug!(%error, "receipt fetch failed");
-                        None
-                    }
-                    Err(_elapsed) => None,
-                };
-                (started.elapsed(), status)
-            }
-            .boxed(),
-        )
     }
 
     /// Records one completed wait; returns true when a resync is needed.
@@ -188,11 +125,6 @@ impl Sender {
     fn report(&self, event: Event) {
         // The reporter outlives all senders; a send only fails during shutdown.
         let _ = self.events.send(event);
-    }
-
-    async fn fetch_pending_nonce(&self) -> eyre::Result<u64> {
-        let fetch = self.provider.get_transaction_count(self.address).pending();
-        Ok(tokio::time::timeout(RPC_TIMEOUT, fetch.into_future()).await??)
     }
 }
 

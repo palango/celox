@@ -5,22 +5,22 @@ use alloy_primitives::{
     utils::{format_ether, format_units},
 };
 use alloy_provider::{DynProvider, Provider};
-use celo_alloy_network::{Celo, ReceiptResponse};
+use celo_alloy_network::Celo;
 use celo_alloy_rpc_types::CeloTransactionRequest;
-use eyre::{Result, WrapErr, ensure};
+use eyre::{Result, bail, ensure};
 use futures::future::try_join_all;
 use tracing::info;
 
-use crate::{celo, fees::FeeQuote, gas};
+use crate::{
+    celo,
+    fees::FeeQuote,
+    gas,
+    lane::{Lane, MAX_WINDOW, Submitted},
+};
 
 /// Upper bound for one ERC-20 `transfer`, not an exact price: the cost depends
 /// on whether the recipient's balance slot is fresh. Unused gas is refunded.
 const ERC20_TRANSFER_GAS: u64 = 100_000;
-
-/// How many funding transactions go out before awaiting their receipts. Nodes
-/// cap pending transactions per account (reth: 16), so the root cannot have a
-/// whole large fleet's funding in flight at once.
-const FUNDING_BATCH: usize = 10;
 
 /// The fee-currency leg of funding: senders paying gas in `token` get topped
 /// up to `target` of it. `decimals` is only for display.
@@ -114,21 +114,31 @@ pub async fn top_up(
         }
     }
 
-    let mut nonce = provider.get_transaction_count(root).pending().await?;
-    for batch in requests.chunks(FUNDING_BATCH) {
-        let mut pending = Vec::with_capacity(batch.len());
-        for request in batch {
-            pending.push(send(provider, request.clone(), root, &mut nonce, fees).await?);
+    // The funder is a single account (root), so one lane bounds its in-flight
+    // funding to the per-account pool cap; the loop keeps it full and awaits
+    // each receipt, failing the run if any funding transaction doesn't land.
+    let mut lane = Lane::open(provider.clone(), root, MAX_WINDOW, Duration::from_secs(30)).await?;
+    let mut requests = requests.into_iter();
+    let mut outstanding = 0usize;
+    loop {
+        while lane.has_capacity() {
+            let Some(request) = requests.next() else {
+                break;
+            };
+            match lane.submit(request, fees).await {
+                Submitted::Sent => outstanding += 1,
+                Submitted::Rejected => bail!("a funding transaction was rejected"),
+            }
         }
-        for wait in pending {
-            let receipt = tokio::time::timeout(Duration::from_secs(30), wait.get_receipt())
-                .await
-                .wrap_err("timed out waiting for a funding receipt")??;
-            ensure!(
-                receipt.status(),
-                "funding transaction {} reverted",
-                receipt.transaction_hash()
-            );
+        if outstanding == 0 {
+            break;
+        }
+        let (_, status) = lane.next_completed().await;
+        outstanding -= 1;
+        match status {
+            Some(true) => {}
+            Some(false) => bail!("a funding transaction reverted"),
+            None => bail!("timed out waiting for a funding receipt"),
         }
     }
     info!(
@@ -174,21 +184,4 @@ fn below_target(senders: &[Address], balances: Vec<U256>, target: U256) -> Vec<(
         .filter(|(_, balance)| *balance < target)
         .map(|(address, balance)| (*address, target - balance))
         .collect()
-}
-
-async fn send(
-    provider: &DynProvider<Celo>,
-    request: CeloTransactionRequest,
-    root: Address,
-    nonce: &mut u64,
-    fees: FeeQuote,
-) -> Result<alloy_provider::PendingTransactionBuilder<Celo>> {
-    // Chain id is left to the provider's cached ChainIdFiller.
-    let request = request
-        .from(root)
-        .nonce(*nonce)
-        .max_fee_per_gas(fees.max_fee)
-        .max_priority_fee_per_gas(fees.tip);
-    *nonce += 1;
-    Ok(provider.send_transaction(request).await?)
 }

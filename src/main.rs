@@ -3,6 +3,7 @@ mod fees;
 mod funder;
 mod gas;
 mod keys;
+mod lane;
 mod pacer;
 mod report;
 mod sender;
@@ -229,7 +230,7 @@ async fn main() -> Result<()> {
     // Every sender RPC is individually bounded, so the drain finishes within
     // receipt_timeout + RPC_TIMEOUT; the deadline is a backstop that turns a
     // wedged shutdown into a failed run instead of a hung CI job.
-    let drain_deadline = args.receipt_timeout + sender::RPC_TIMEOUT + Duration::from_secs(5);
+    let drain_deadline = args.receipt_timeout + lane::RPC_TIMEOUT + Duration::from_secs(5);
     let mut sender_failed = false;
     match tokio::time::timeout(drain_deadline, join_all(tasks)).await {
         Ok(results) => {

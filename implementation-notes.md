@@ -39,6 +39,24 @@ is abandoned and its repo is gone.
     few hundred tps, scheduler jitter loses tokens and undershoots the
     target. Refill by elapsed time if high rates become a goal.
 
+### M3 — calldata workload (done)
+
+- `workloads::Calldata`: `--data-size` (default 1024) random bytes to a burner
+  EOA `0xcaca…ca`, value 0. Fresh `rand::rng()` per `next` call, so the shared
+  `Arc<Workload>` needs no interior mutability.
+- Gas is the EIP-7623 floor `21_000 + 10 * tokens`
+  (`tokens = zero_bytes + 4 * non_zero_bytes`). A call to an EOA adds no
+  execution gas to the standard `21_000 + 4 * tokens`, so the floor always wins
+  and is the exact cost — no padding.
+- Workload knobs now travel in `workloads::Config`, built from the CLI in
+  `main`; `Workload::new(kind, config)`.
+- Verified on anvil (1s blocks, `--data-size 2048 --tps 10 --senders 5
+  --duration 10s`): 110 sent, 110 confirmed, 0 reverted/dropped/rejected,
+  p50 0.72s, exit 0. Receipt spot-check: gas limit 0x19136 (102710) for a
+  payload with 7 zero and 2041 non-zero bytes, `gasUsed` identical, status 1 —
+  the formula is exact.
+- `rand` pinned to 0.9 (0.10 is out; not adopted, no reason to chase it yet).
+
 ## Verification strategy (settled with Paul, 2026-08-07)
 
 - **anvil** for all non-CIP-64 work (M1–M3, M5 native mode): standard EIP-1559

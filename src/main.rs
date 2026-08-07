@@ -39,6 +39,10 @@ struct Args {
     #[arg(long, value_enum, default_value_t = WorkloadKind::Transfer)]
     workload: WorkloadKind,
 
+    /// Calldata payload size in bytes, for the `calldata` workload
+    #[arg(long, default_value_t = 1024)]
+    data_size: usize,
+
     /// Target transactions per second across all senders
     #[arg(long, default_value_t = 10.0)]
     tps: f64,
@@ -101,7 +105,12 @@ async fn main() -> Result<()> {
     )
     .await?;
 
-    let mut workload = Workload::new(args.workload);
+    let mut workload = Workload::new(
+        args.workload,
+        workloads::Config {
+            data_size: args.data_size,
+        },
+    );
     workload.setup(&root).await?;
     let workload = Arc::new(workload);
 

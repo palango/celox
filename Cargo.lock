@@ -1216,6 +1216,7 @@ dependencies = [
  "eyre",
  "futures",
  "humantime",
+ "rand 0.9.5",
  "tokio",
  "tracing",
  "tracing-subscriber",

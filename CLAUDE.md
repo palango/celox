@@ -63,6 +63,11 @@ workload, not a flag that applies to all workloads.
 
 ## Gotchas
 
+- **Localhost hides bugs.** alloy picks its receipt poll interval from the hostname: 250ms
+  for `localhost`/`127.0.0.1`/`::1`, **7 seconds** for everything else. celox sets it
+  explicitly (`--poll-interval`), but the lesson generalises — a change that looks correct
+  against anvil can behave completely differently against a remote endpoint. Ask what a
+  fix assumes about latency, fees and block time before calling it verified.
 - **anvil cannot serve CIP-64**: no type-0x7b, no fee-currency RPCs. Use the celo-reth dev
   node from `../celo-kona` (`e2e_test/` has the genesis and dev key) or Celo Sepolia.
 - **Celo Sepolia (chain 11142220) is the current testnet.** Alfajores and Baklava are dead.

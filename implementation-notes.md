@@ -139,6 +139,17 @@ is abandoned and its repo is gone.
 - Logs now disable ANSI colour when stdout is not a terminal, so recipes can
   parse them.
 
+### M6 — polish (done)
+
+- README covering workloads, the funding/sending/reporting model, throughput
+  ceilings and the dev recipes.
+- Second Ctrl-C during the drain exits 130 instead of waiting out
+  `receipt_timeout`. Verified by stalling a drain (`anvil_setIntervalMining 0`):
+  first SIGINT drained and stayed alive, second exited 130 in under a second.
+  Graceful path verified separately: 158/158 confirmed, exit 0.
+- `--window` above `lane::MAX_WINDOW` now warns rather than failing, since the
+  16-per-account cap is a node policy and not universal.
+
 ### Base-fee saturation finding (2026-08-07, 100 senders on anvil)
 
 Anvil (30M gas limit, 1s blocks) with 100 senders at 300 tps: blocks filled

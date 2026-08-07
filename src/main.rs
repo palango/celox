@@ -113,6 +113,14 @@ async fn main() -> Result<()> {
     );
     ensure!(args.senders > 0, "--senders must be at least 1");
     ensure!(args.window > 0, "--window must be at least 1");
+    if args.window > lane::MAX_WINDOW {
+        warn!(
+            window = args.window,
+            cap = lane::MAX_WINDOW,
+            "--window exceeds the per-account pending limit nodes typically enforce; \
+             the excess will be rejected"
+        );
+    }
     // Beyond this, txpool per-tx size limits reject everything anyway.
     ensure!(
         args.data_size <= 128 * 1024,
@@ -243,6 +251,16 @@ async fn main() -> Result<()> {
     // Cannot fail while main's own stop_rx binding is alive, but never let a
     // refactor of that binding skip the summary.
     let _ = stop_tx.send(true);
+
+    // Draining waits out the receipts of everything already sent, which takes
+    // as long as the chain does. A second interrupt says the operator would
+    // rather have the process back than the statistics.
+    tokio::spawn(async {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            warn!("interrupted again, abandoning pending transactions");
+            std::process::exit(130);
+        }
+    });
 
     // Every sender RPC is individually bounded, so the drain finishes within
     // receipt_timeout + RPC_TIMEOUT; the deadline is a backstop that turns a

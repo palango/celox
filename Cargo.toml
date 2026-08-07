@@ -19,5 +19,10 @@ alloy-primitives = "1.6.0"
 tokio = { version = "1.49", features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
 clap = { version = "4", features = ["derive", "env"] }
 eyre = "0.6"
+futures = "0.3"
+humantime = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tokio = { version = "1.49", features = ["test-util"] }

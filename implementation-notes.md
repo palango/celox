@@ -16,6 +16,24 @@ is abandoned and its repo is gone.
 - Verified against anvil 1.7.1 (`--block-time 1`): self-transfer sent, receipt
   status 1, gas 21000.
 
+### M2 — sender pool (done)
+
+- Modules: `keys` (derivation, golden-address test), `pacer` (token bucket,
+  1s burst cap), `funder` (batch top-up with preset nonces), `sender` (one
+  task per account: local nonce, `FuturesOrdered` in-flight window, receipt
+  timeout), `report` (event aggregation, exit code), `workloads/` (enum
+  dispatch, `transfer` = 1-wei self-transfer).
+- Verified on anvil (1s blocks): 20 tps × 15s → 320/320 confirmed, exit 0;
+  status lines match target rate. Second run topped up only burned gas
+  (~0.0015 CELO vs 0.5), proving derived-key balance reuse.
+- Simplifications accepted for v1 (revisit if they bite):
+  - On a dropped tx the sender drains its window passively (later txs wait
+    out their own timeouts) before resyncing the nonce — no active
+    cancel/replace. Txs that land after being counted dropped skew stats.
+  - Funding happens once at startup; no refill loop during long runs.
+  - Fee quote refresh is global, every 30s, native-denominated only (cip64
+    fee quoting comes with M4).
+
 ## Verification strategy (settled with Paul, 2026-08-07)
 
 - **anvil** for all non-CIP-64 work (M1–M3, M5 native mode): standard EIP-1559

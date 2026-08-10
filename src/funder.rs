@@ -214,3 +214,106 @@ fn below_target(senders: &[Address], balances: Vec<U256>, target: U256) -> Vec<(
         .map(|(address, balance)| (*address, target - balance))
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use alloy_primitives::address;
+    use alloy_provider::ProviderBuilder;
+    use alloy_signer_local::PrivateKeySigner;
+    use alloy_transport::mock::Asserter;
+    use celo_alloy_network::EthereumWallet;
+
+    use super::*;
+
+    /// anvil dev key 0, the signer registered in the mocked wallet.
+    const ROOT: Address = address!("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+    const SENDERS: [Address; 2] = [
+        address!("1111111111111111111111111111111111111111"),
+        address!("2222222222222222222222222222222222222222"),
+    ];
+
+    fn mocked() -> (Asserter, DynProvider<Celo>) {
+        let asserter = Asserter::new();
+        let signer: PrivateKeySigner =
+            "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+                .parse()
+                .unwrap();
+        let provider = ProviderBuilder::new_with_network::<Celo>()
+            .wallet(EthereumWallet::new(signer))
+            .connect_mocked_client(asserter.clone())
+            .erased();
+        (asserter, provider)
+    }
+
+    fn fees() -> FeeQuote {
+        FeeQuote {
+            max_fee: 1_000_000_000,
+            tip: 1_000_000,
+        }
+    }
+
+    #[test]
+    fn only_accounts_below_the_target_are_topped_up() {
+        let target = U256::from(100);
+        let balances = vec![U256::from(40), U256::from(100), U256::ZERO];
+        let accounts = [SENDERS[0], SENDERS[1], ROOT];
+
+        let topups = below_target(&accounts, balances, target);
+
+        // The account already at the target is left alone, and each shortfall
+        // is the difference, not the target.
+        assert_eq!(topups, vec![(SENDERS[0], U256::from(60)), (ROOT, target)]);
+    }
+
+    #[tokio::test]
+    async fn an_insolvent_root_bails_before_spending_anything() {
+        let (asserter, provider) = mocked();
+        asserter.push_success(&"0x1"); // root holds 1 wei
+        asserter.push_success(&"0x0"); // both senders hold nothing
+        asserter.push_success(&"0x0");
+
+        let error = top_up(
+            &provider,
+            ROOT,
+            &SENDERS,
+            U256::from(1_000_000_000_000_000_000u64),
+            None,
+            fees(),
+            10,
+        )
+        .await
+        .unwrap_err();
+
+        // Funding is all or nothing: it must fail before the first transfer,
+        // so the queue still holds nothing it was asked to send.
+        assert!(
+            error
+                .to_string()
+                .contains("but funding all 2 senders needs"),
+            "unexpected error: {error}"
+        );
+        assert!(asserter.read_q().is_empty());
+    }
+
+    #[tokio::test]
+    async fn already_funded_senders_cost_no_transactions() {
+        let (asserter, provider) = mocked();
+        asserter.push_success(&"0xde0b6b3a7640000"); // root: 1 CELO
+        asserter.push_success(&"0xde0b6b3a7640000"); // each sender already at target
+        asserter.push_success(&"0xde0b6b3a7640000");
+
+        top_up(
+            &provider,
+            ROOT,
+            &SENDERS,
+            U256::from(100_000_000_000_000_000u64),
+            None,
+            fees(),
+            10,
+        )
+        .await
+        .unwrap();
+
+        assert!(asserter.read_q().is_empty());
+    }
+}

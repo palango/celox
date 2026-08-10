@@ -189,3 +189,192 @@ async fn pending_nonce(provider: &DynProvider<Celo>, account: Address) -> eyre::
     let fetch = provider.get_transaction_count(account).pending();
     Ok(tokio::time::timeout(RPC_TIMEOUT, fetch.into_future()).await??)
 }
+
+#[cfg(test)]
+mod tests {
+    use alloy_primitives::{B256, U256, address, b256};
+    use alloy_provider::ProviderBuilder;
+    use alloy_signer_local::PrivateKeySigner;
+    use alloy_transport::mock::Asserter;
+    use celo_alloy_network::EthereumWallet;
+    use serde_json::json;
+
+    use super::*;
+
+    /// anvil dev key 0, the signer registered in the mocked wallet below.
+    const ACCOUNT: Address = address!("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+    const TX_HASH: B256 = b256!("1111111111111111111111111111111111111111111111111111111111111111");
+
+    fn mocked() -> (Asserter, DynProvider<Celo>) {
+        let asserter = Asserter::new();
+        let signer: PrivateKeySigner =
+            "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+                .parse()
+                .unwrap();
+        let provider = ProviderBuilder::new_with_network::<Celo>()
+            .wallet(EthereumWallet::new(signer))
+            .connect_mocked_client(asserter.clone())
+            .erased();
+        (asserter, provider)
+    }
+
+    fn fees() -> FeeQuote {
+        FeeQuote {
+            max_fee: 1_000_000_000,
+            tip: 1_000_000,
+        }
+    }
+
+    fn transfer() -> CeloTransactionRequest {
+        CeloTransactionRequest::default()
+            .to(ACCOUNT)
+            .value(U256::from(1))
+            .gas_limit(21_000)
+    }
+
+    /// A receipt as the node would return it. Only the fields the Celo receipt
+    /// type needs to deserialise and the status celox reads.
+    fn receipt_json(status: bool) -> serde_json::Value {
+        json!({
+            "type": "0x2",
+            "status": if status { "0x1" } else { "0x0" },
+            "cumulativeGasUsed": "0x5208",
+            "logs": [],
+            "logsBloom": format!("0x{}", "00".repeat(256)),
+            "transactionHash": TX_HASH,
+            "transactionIndex": "0x0",
+            "blockHash": TX_HASH,
+            "blockNumber": "0x1",
+            "gasUsed": "0x5208",
+            "effectiveGasPrice": "0x1",
+            "from": ACCOUNT,
+            "to": ACCOUNT,
+            "contractAddress": null,
+        })
+    }
+
+    async fn open_lane(asserter: &Asserter, provider: &DynProvider<Celo>, nonce: u64) -> Lane {
+        asserter.push_success(&format!("0x{nonce:x}"));
+        Lane::open(provider.clone(), ACCOUNT, 2, Duration::from_millis(200))
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn open_anchors_on_the_pending_nonce() {
+        let (asserter, provider) = mocked();
+        let lane = open_lane(&asserter, &provider, 7).await;
+        assert_eq!(lane.nonce, 7);
+        assert_eq!(lane.in_flight(), 0);
+        assert!(lane.has_capacity());
+    }
+
+    #[tokio::test]
+    async fn a_rejected_submission_does_not_consume_the_nonce() {
+        let (asserter, provider) = mocked();
+        let mut lane = open_lane(&asserter, &provider, 7).await;
+
+        asserter.push_success(&"0x1"); // eth_chainId, filled once per provider
+        asserter.push_failure_msg("insufficient funds");
+        assert_eq!(lane.submit(transfer(), fees()).await, Submitted::Rejected);
+
+        // The transaction never reached the chain, so the nonce still belongs
+        // to the next attempt and nothing occupies the window.
+        assert_eq!(lane.nonce, 7);
+        assert_eq!(lane.in_flight(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_sent_transaction_advances_the_nonce_and_fills_the_window() {
+        let (asserter, provider) = mocked();
+        let mut lane = open_lane(&asserter, &provider, 7).await;
+
+        asserter.push_success(&"0x1"); // eth_chainId
+        asserter.push_success(&TX_HASH);
+        assert_eq!(lane.submit(transfer(), fees()).await, Submitted::Sent);
+        assert_eq!(lane.nonce, 8);
+        assert_eq!(lane.in_flight(), 1);
+        assert!(lane.has_capacity());
+
+        asserter.push_success(&TX_HASH);
+        assert_eq!(lane.submit(transfer(), fees()).await, Submitted::Sent);
+        assert_eq!(lane.nonce, 9);
+        assert_eq!(lane.in_flight(), 2);
+        // The window is full at 2: the caller must drain before sending more.
+        assert!(!lane.has_capacity());
+    }
+
+    #[tokio::test]
+    async fn resync_reanchors_on_the_chain() {
+        let (asserter, provider) = mocked();
+        let mut lane = open_lane(&asserter, &provider, 7).await;
+
+        asserter.push_success(&"0x2a");
+        lane.resync().await.unwrap();
+        assert_eq!(lane.nonce, 42);
+    }
+
+    #[tokio::test]
+    async fn a_transient_receipt_error_does_not_become_a_drop() {
+        // The bug this guards: any receipt error used to be reported as a
+        // dropped transaction, turning a flaky endpoint into fabricated
+        // failures and a needless nonce resync.
+        let (asserter, provider) = mocked();
+        asserter.push_failure_msg("temporarily unavailable");
+        asserter.push_success(&serde_json::Value::Null); // mined, receipt not visible yet
+        asserter.push_success(&receipt_json(true));
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        assert_eq!(poll_receipt(&provider, TX_HASH, deadline).await, Some(true));
+    }
+
+    /// The whole path, not just the helper: submit, have the receipt watcher
+    /// fail, and confirm the lane still reports the transaction as confirmed.
+    /// Guards the bug where any watcher error was recorded as a drop.
+    #[tokio::test]
+    async fn a_submitted_transaction_survives_a_failing_receipt_watcher() {
+        let (asserter, provider) = mocked();
+        let mut lane = open_lane(&asserter, &provider, 7).await;
+
+        asserter.push_success(&"0x1"); // eth_chainId
+        asserter.push_success(&TX_HASH); // eth_sendRawTransaction
+        assert_eq!(lane.submit(transfer(), fees()).await, Submitted::Sent);
+
+        // The watcher's first query fails, as a flaky endpoint would; the
+        // by-hash fallback then finds the receipt that was there all along.
+        asserter.push_failure_msg("temporarily unavailable");
+        for _ in 0..4 {
+            asserter.push_success(&receipt_json(true));
+        }
+
+        let (_latency, status) = lane.next_completed().await;
+        assert_eq!(
+            status,
+            Some(true),
+            "a landed transaction must not be a drop"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reverted_receipt_is_reported_as_such() {
+        let (asserter, provider) = mocked();
+        asserter.push_success(&receipt_json(false));
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        assert_eq!(
+            poll_receipt(&provider, TX_HASH, deadline).await,
+            Some(false)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_receipt_that_never_arrives_is_a_drop() {
+        let (asserter, provider) = mocked();
+        for _ in 0..50 {
+            asserter.push_success(&serde_json::Value::Null);
+        }
+
+        let deadline = Instant::now() + Duration::from_millis(600);
+        assert_eq!(poll_receipt(&provider, TX_HASH, deadline).await, None);
+    }
+}

@@ -229,6 +229,32 @@ README now says to read them next to the drop count); a permanently stale fee
 quote fails the run through rejections without naming itself as the cause;
 `Summary::latencies` is unbounded and cloned per percentile call.
 
+### Mock-transport tests (2026-08-10) — closes Codex's test-gap finding
+
+`Lane`, `Sender` and `Funder` now have tests, built on alloy's
+`Asserter`/`connect_mocked_client` (dev-deps `alloy-transport`, `serde_json`).
+37 tests total, up from 21.
+
+- **Lane** (8): opening anchors on the pending nonce; a rejection does not
+  consume the nonce or the window; a send advances both and the window fills at
+  its bound; resync re-anchors; the by-hash fallback survives a transient error,
+  reports a status-0 revert, and gives up at the deadline; and the end-to-end
+  case — submit, watcher fails, transaction still reported confirmed.
+- **Sender** (6): the status→outcome→event mapping for all three terminal
+  states including which of them forces a resync; the loop sends and exits when
+  stopped; a sender that cannot read its opening nonce fails instead of spamming.
+- **Funder** (3): only accounts below target are topped up and by the
+  difference; an insolvent root bails without sending; already-funded senders
+  cost no transactions.
+
+**Two lessons worth keeping.** The mocked wallet only signs for addresses it
+holds, so a test using a foreign `from` gets a *local* signing error — my first
+rejection test passed for that reason rather than the one it claimed. And
+mutation-testing the guards found the important one worthless: the first
+version called `poll_receipt` directly, so reintroducing the bug in `submit`
+left it green. Both critical guards are now verified to fail when their fix is
+reverted; do the same for any future test that claims to guard a specific bug.
+
 **Still deferred:** replace-by-fee for transactions stranded when the base fee
 overtakes their cap; mock-transport tests for `Lane`/`Sender`/`Funder` — Codex
 correctly notes the untested surface is broader than the notes claimed, since it

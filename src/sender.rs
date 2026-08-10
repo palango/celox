@@ -130,7 +130,139 @@ impl Sender {
 
 #[cfg(test)]
 mod tests {
+    use alloy_primitives::{address, b256};
+    use alloy_provider::{Provider, ProviderBuilder};
+    use alloy_signer_local::PrivateKeySigner;
+    use alloy_transport::mock::Asserter;
+    use celo_alloy_network::EthereumWallet;
+
     use super::*;
+    use crate::{report::Outcome, workloads::Transfer};
+
+    /// anvil dev key 0, the signer registered in the mocked wallet.
+    const ACCOUNT: Address = address!("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+
+    struct Harness {
+        sender: Sender,
+        asserter: Asserter,
+        events: mpsc::UnboundedReceiver<Event>,
+        stop: watch::Sender<bool>,
+    }
+
+    fn harness(window: usize, receipt_timeout: Duration) -> Harness {
+        let asserter = Asserter::new();
+        let signer: PrivateKeySigner =
+            "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+                .parse()
+                .unwrap();
+        let provider = ProviderBuilder::new_with_network::<Celo>()
+            .wallet(EthereumWallet::new(signer))
+            .connect_mocked_client(asserter.clone())
+            .erased();
+        let (event_tx, events) = mpsc::unbounded_channel();
+        let (stop, stop_rx) = watch::channel(false);
+        let (_fee_tx, fees) = watch::channel(FeeQuote {
+            max_fee: 1_000_000_000,
+            tip: 1_000_000,
+        });
+        // Leak the fee sender: the receiver must stay live for the run.
+        std::mem::forget(_fee_tx);
+        Harness {
+            sender: Sender {
+                provider,
+                address: ACCOUNT,
+                window,
+                receipt_timeout,
+                workload: Arc::new(crate::workloads::Workload::Transfer(Transfer)),
+                pacer: Pacer::start(1_000.0),
+                fees,
+                events: event_tx,
+                stop: stop_rx,
+            },
+            asserter,
+            events,
+            stop,
+        }
+    }
+
+    fn drain(events: &mut mpsc::UnboundedReceiver<Event>) -> Vec<Event> {
+        let mut collected = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            collected.push(event);
+        }
+        collected
+    }
+
+    #[tokio::test]
+    async fn a_confirmed_receipt_reports_confirmed_and_needs_no_resync() {
+        let mut h = harness(1, Duration::from_millis(50));
+        let resync = h.sender.record(Duration::from_millis(10), Some(true));
+        assert!(!resync);
+        assert!(matches!(
+            drain(&mut h.events)[..],
+            [Event::Done(Outcome::Confirmed { .. })]
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_status_zero_receipt_reports_reverted_and_needs_no_resync() {
+        let mut h = harness(1, Duration::from_millis(50));
+        // A revert still consumed the nonce, so the lane stays anchored.
+        let resync = h.sender.record(Duration::from_millis(10), Some(false));
+        assert!(!resync);
+        assert!(matches!(
+            drain(&mut h.events)[..],
+            [Event::Done(Outcome::Reverted)]
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_missing_receipt_reports_dropped_and_forces_a_resync() {
+        let mut h = harness(1, Duration::from_millis(50));
+        // The transaction's fate is unknown, so the local nonce is suspect.
+        let resync = h.sender.record(Duration::from_millis(10), None);
+        assert!(resync);
+        assert!(matches!(
+            drain(&mut h.events)[..],
+            [Event::Done(Outcome::Dropped)]
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_loop_sends_and_then_stops_when_told() {
+        let mut h = harness(1, Duration::from_millis(50));
+        h.asserter.push_success(&"0x0"); // pending nonce
+        h.asserter.push_success(&"0x1"); // chain id
+        h.asserter.push_success(&b256!(
+            "1111111111111111111111111111111111111111111111111111111111111111"
+        ));
+
+        let task = h.sender.spawn();
+        // Give the loop time to send, then wait out the receipt timeout so the
+        // window drains rather than the task being killed mid-flight.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        h.stop.send(true).unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("a stopped sender exits within the drain window")
+            .unwrap()
+            .unwrap();
+
+        let events = drain(&mut h.events);
+        assert!(
+            events.iter().any(|e| matches!(e, Event::Sent)),
+            "expected a Sent event, got {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sender_that_cannot_read_its_nonce_fails_rather_than_spamming() {
+        let h = harness(1, Duration::from_millis(50));
+        // Empty asserter queue: the opening nonce fetch errors.
+        let error = h.sender.spawn().await.unwrap().unwrap_err();
+        assert!(error.to_string().contains(&ACCOUNT.to_string()));
+    }
 
     #[test]
     fn step_truth_table() {

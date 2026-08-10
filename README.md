@@ -33,26 +33,95 @@ logs the endpoint and chain id it connected to — check them.
 Exit codes: `0` clean, `1` any failure (including a run that sent nothing, or a
 shutdown that could not drain), `130` interrupted.
 
+## Docker
+
+```sh
+docker build -t celox .
+docker run --rm -e CELOX_PRIVATE_KEY \
+    celox --rpc-url https://forno.celo-sepolia.celo-testnet.org \
+          --tps 20 --senders 10 --duration 30s
+```
+
+The image carries only the binary and a trust store; the build needs no Solidity
+toolchain because the contract artifact is committed. To reach a node on the
+host — anvil, say — use `--network host` on Linux, or
+`--rpc-url http://host.docker.internal:8545` on macOS and Windows.
+
 ## Workloads
 
-| Workload   | What each transaction does                            | Knobs                     |
-|------------|-------------------------------------------------------|---------------------------|
-| `transfer` | 1-wei native self-transfer (the cheapest baseline)     | —                         |
-| `calldata` | Random calldata to a burner account                    | `--data-size`             |
-| `cip64`    | Self-transfer paying gas in a fee currency (type 0x7b) | `--fee-currency`, `--fund-token` |
-| `storage`  | Writes storage slots in one shared contract            | `--writes`, `--key-space` |
+Each workload stresses a different part of a node. All of them share the pacing,
+funding and reporting described below; they differ only in what transaction they
+produce. Every example assumes `CELOX_PRIVATE_KEY` is exported and a chain is
+reachable at `--rpc-url` (default `http://127.0.0.1:8545`).
 
-`cip64` requires `--fee-currency <address>`. The address is validated against
-the chain's FeeCurrencyDirectory — resolved through the Celo registry — and its
-per-currency intrinsic gas surcharge is read from there rather than guessed.
-Adapter currencies (USDC, USDT) are rejected: celox cannot move them to fund
-senders.
+### `transfer` — baseline throughput
 
-`storage` deploys `contracts/src/StateWriter.sol` and has every sender write
-into it, so the load contends for one account's storage trie. `--key-space`
-picks the kind of pressure: a wide range spreads writes over fresh slots and
-grows the state trie, a narrow one concentrates them on hot slots that every
-sender rewrites.
+A 1-wei self-transfer: 21,000 gas, no calldata, no contract. The cheapest
+transaction the chain will accept, so it measures how many transactions per
+second the pipeline and the node can move before gas becomes the limit.
+
+```sh
+celox --workload transfer --tps 200 --senders 20 --duration 1m
+```
+
+Use it to find a node's transaction-count ceiling, and as the control when a
+heavier workload behaves oddly.
+
+### `calldata` — data throughput
+
+Random bytes sent to a burner account, so the transaction pays for its payload
+and runs no code. Gas is the EIP-7623 calldata floor, priced exactly.
+
+```sh
+celox --workload calldata --data-size 4096 --tps 50 --senders 20 --duration 1m
+```
+
+`--data-size` is the payload in bytes (default 1024, max 128 KiB). Raise it to
+push bandwidth, block-size limits and the propagation path rather than execution.
+
+### `cip64` — fee-currency transactions
+
+A self-transfer whose gas is paid in an ERC-20 rather than CELO, as a type-`0x7b`
+transaction. This is the workload that exercises Celo's alternative-fee path end
+to end: the directory lookup, the debit before execution and the credit after.
+
+```sh
+# Celo Sepolia, paying fees in cUSD
+celox --rpc-url https://forno.celo-sepolia.celo-testnet.org       --workload cip64       --fee-currency 0xEF4d55D6dE8e8d73232827Cd1e9b2F2dBb45bC80       --fund-token 5 --tps 20 --senders 10 --duration 1m
+```
+
+The address is validated against the chain's FeeCurrencyDirectory — resolved
+through the Celo registry — and the per-currency intrinsic gas surcharge is read
+from there rather than guessed. `--fund-token` is how much of the token each
+sender is given, in whole tokens scaled by the token's own decimals; the root
+account must hold enough for every sender.
+
+Adapter currencies (USDC, USDT) are rejected up front: they exist to present a
+6-decimal token as an 18-decimal fee currency, revert on `decimals()`, and cannot
+be transferred, so celox cannot fund senders with them.
+
+Other Celo Sepolia currencies: cEUR `0x6B172e333e2978484261D7eCC3DE491E79764BbC`,
+cREAL `0x13d68A1Bf4a8cB7d9feF54EF70401871b666269c`.
+
+### `storage` — state growth and contention
+
+Deploys `contracts/src/StateWriter.sol` and has every sender call it, so the load
+converges on one contract's storage trie. `--writes` sets how many slots each
+transaction touches; `--key-space` decides what kind of pressure that is.
+
+```sh
+# State growth: writes land on fresh slots and the trie keeps growing
+celox --workload storage --writes 10 --key-space 100000000 --tps 50 --senders 20
+
+# Contention: every sender rewrites the same handful of hot slots
+celox --workload storage --writes 10 --key-space 16 --tps 50 --senders 20
+```
+
+A fresh slot costs about 22,100 gas and a rewritten one about 5,000, so the two
+modes differ in cost as well as in what they stress: the first grows state and
+the work of computing a state root, the second concentrates writes where
+execution must serialise them. Gas is preset as an upper bound for the fresh
+case, which over-provisions by a few percent once a key range has filled.
 
 ## How it works
 
@@ -114,6 +183,7 @@ just e2e          # transfer workload against a throwaway anvil
 just e2e-storage  # storage workload; asserts the contract's slot equals the confirmed count
 just e2e-cip64    # CIP-64 against a celo-reth dev node from ../celo-kona
 just build-contracts   # recompile Solidity and refresh the committed artifacts
+just docker-build      # build the container image
 ```
 
 `e2e-cip64` needs a celo-kona checkout beside this one; anvil cannot serve

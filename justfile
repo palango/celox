@@ -28,6 +28,10 @@ build-contracts:
 test:
     cargo test
 
+# Build the container image.
+docker-build:
+    docker build -t celox .
+
 # End-to-end smoke test against a throwaway anvil node (anvil dev key 0 as root)
 e2e:
     #!/usr/bin/env bash

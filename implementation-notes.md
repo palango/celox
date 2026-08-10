@@ -350,6 +350,18 @@ considering if our 6% over-provisioning or block-packing fidelity ever matters.
   context split, Funder struct; M5 needs `setup(root, senders)` since Paul
   chose real-ERC-20-balance AMM swaps.
 
+### Packaging (2026-08-10)
+
+- Published at github.com/palango/celox, public, default branch `main`.
+- `Dockerfile`: multi-stage, `rust:1.97-slim-bookworm` → `debian:bookworm-slim`,
+  non-root, dependency-stub layer for caching. Builder needs `cmake` and
+  `build-essential` because rustls pulls aws-lc-rs (native), and `git` for the
+  celo-alloy git dependency; the runtime needs only `ca-certificates`.
+  **Unverified: no container runtime on this machine.** Both base-image tags
+  were confirmed to exist on Docker Hub, but the image has never been built —
+  build it before relying on it.
+- README gained a worked example per workload, each run against anvil first.
+
 ## Verification strategy (settled with Paul, 2026-08-07)
 
 - **anvil** for all non-CIP-64 work (M1–M3, M5 native mode): standard EIP-1559

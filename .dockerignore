@@ -1,0 +1,4 @@
+.git
+target
+contracts/out
+contracts/cache

@@ -26,13 +26,13 @@ use eyre::{OptionExt, Result};
 pub use calldata::Calldata;
 pub use cip64::Cip64;
 pub use storage::Storage;
-pub use transfer::Transfer;
+pub use transfer::{Recipient, Transfer};
 
 use crate::celo::FeeCurrency;
 
 #[derive(Clone, Copy, Debug, PartialEq, clap::ValueEnum)]
 pub enum WorkloadKind {
-    /// 1-wei native self-transfers
+    /// 1-wei native transfers; --recipient picks self-transfers or fresh accounts
     Transfer,
     /// Random calldata to a burner account
     Calldata,
@@ -45,6 +45,7 @@ pub enum WorkloadKind {
 /// Workload settings from the CLI. Each workload reads only the fields it needs.
 #[derive(Clone, Copy, Debug)]
 pub struct Config {
+    pub recipient: Recipient,
     pub data_size: usize,
     pub fee_currency: Option<FeeCurrency>,
     pub writes: u64,
@@ -63,7 +64,7 @@ impl Workload {
     /// contract deploy) with the root account.
     pub async fn new(kind: WorkloadKind, config: Config, root: &DynProvider<Celo>) -> Result<Self> {
         Ok(match kind {
-            WorkloadKind::Transfer => Self::Transfer(Transfer),
+            WorkloadKind::Transfer => Self::Transfer(Transfer::new(config.recipient)),
             WorkloadKind::Calldata => Self::Calldata(Calldata::new(config.data_size)),
             WorkloadKind::Cip64 => Self::Cip64(Cip64::new(
                 config

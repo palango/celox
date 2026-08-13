@@ -27,7 +27,7 @@ use tracing::{info, warn};
 use crate::{
     pacer::Pacer,
     sender::Sender,
-    workloads::{Workload, WorkloadKind},
+    workloads::{Recipient, Workload, WorkloadKind},
 };
 
 /// Transaction load-testing tool for Celo chains.
@@ -45,6 +45,11 @@ struct Args {
     /// Workload to generate
     #[arg(long, value_enum, default_value_t = WorkloadKind::Transfer)]
     workload: WorkloadKind,
+
+    /// Where the `transfer` workload sends: `self` only burns gas, `fresh`
+    /// mints a brand-new account per transaction, growing the account trie
+    #[arg(long, value_enum, default_value_t = Recipient::Sender)]
+    recipient: Recipient,
 
     /// Calldata payload size in bytes, for the `calldata` workload
     #[arg(long, default_value_t = 1024)]
@@ -230,6 +235,7 @@ async fn run() -> Result<u8> {
         Workload::new(
             args.workload,
             workloads::Config {
+                recipient: args.recipient,
                 data_size: args.data_size,
                 fee_currency,
                 writes: args.writes,

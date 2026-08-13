@@ -54,18 +54,33 @@ funding and reporting described below; they differ only in what transaction they
 produce. Every example assumes `CELOX_PRIVATE_KEY` is exported and a chain is
 reachable at `--rpc-url` (default `http://127.0.0.1:8545`).
 
-### `transfer` — baseline throughput
+### `transfer` — baseline throughput and account-trie growth
 
-A 1-wei self-transfer: 21,000 gas, no calldata, no contract. The cheapest
-transaction the chain will accept, so it measures how many transactions per
-second the pipeline and the node can move before gas becomes the limit.
+A 1-wei native transfer: 21,000 gas, no calldata, no contract. `--recipient`
+decides what state pressure that puts on the chain:
 
 ```sh
+# Baseline (default): self-transfers, senders only burn gas
 celox --workload transfer --tps 200 --senders 20 --duration 1m
+
+# Account growth: every transfer mints a brand-new account
+celox --workload transfer --recipient fresh --tps 200 --senders 20
 ```
 
-Use it to find a node's transaction-count ceiling, and as the control when a
-heavier workload behaves oddly.
+`self` touches no account but the sender's own, so it measures how many
+transactions per second the pipeline and the node can move — use it to find a
+node's transaction-count ceiling, and as the control when a heavier workload
+behaves oddly.
+
+`fresh` sends the wei to a random never-seen address instead, so the chain
+inserts one new account-trie leaf per transaction, at keccak-uniform positions
+with no path locality — the load shape a burst of new accounts puts on a
+node's state-root computation. Account creation costs nothing at the
+transaction level, so gas stays exactly 21,000 and this is the cheapest
+possible way to grow the account trie: new accounts per second equals the
+confirmed rate. (For growing a contract's *storage* trie, see `storage`
+below.) Each transaction strands 1 wei on a keyless address, which is
+negligible next to its gas.
 
 ### `calldata` — data throughput
 

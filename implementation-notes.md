@@ -362,6 +362,28 @@ considering if our 6% over-provisioning or block-packing fidelity ever matters.
   build it before relying on it.
 - README gained a worked example per workload, each run against anvil first.
 
+### M7 — fresh-recipient transfer mode (2026-08-13)
+
+- Motivation: celo-blockchain-planning#1453 — the mainnet nightly driver is
+  new-account insertion (~67 fresh keccak-uniform account-trie leaves per 1s
+  block, `HashedAccounts` growth 0.23/s → 67.3/s). celox could grow a storage
+  trie (`storage` with a wide `--key-space`) but not the account trie.
+- Paul's call: a mode on `transfer` (`--recipient self|fresh`, default `self`),
+  not a separate workload — same design language as storage's `--key-space`:
+  one transaction shape, the knob picks the state pressure.
+- A batch fan-out contract was considered and rejected on gas math: `CALL`
+  with value to an empty account pays the 25k `G_newaccount` surcharge
+  (~34k gas per account) while a top-level transfer creates the account free
+  (exact 21,000), so batching mints *fewer* accounts per block for the same
+  gas — and celox's send rate is not the bottleneck (1438 tps measured, M-fix
+  round). Recipient modes for insert-vs-update A/B (karlb's rig) also skipped:
+  fresh only, per Paul.
+- No e2e recipe (Paul's call). One-off verification on anvil (1s blocks,
+  20 tps × 10s): 220/220 confirmed, exit 0; on-chain cross-check found 220
+  one-wei transfers with 220 *distinct* recipients, each with balance exactly
+  1 wei, nonce 0 and no code — one brand-new account per confirmed
+  transaction.
+
 ## Verification strategy (settled with Paul, 2026-08-07)
 
 - **anvil** for all non-CIP-64 work (M1–M3, M5 native mode): standard EIP-1559

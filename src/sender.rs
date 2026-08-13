@@ -137,7 +137,10 @@ mod tests {
     use celo_alloy_network::EthereumWallet;
 
     use super::*;
-    use crate::{report::Outcome, workloads::Transfer};
+    use crate::{
+        report::Outcome,
+        workloads::{Recipient, Transfer},
+    };
 
     /// anvil dev key 0, the signer registered in the mocked wallet.
     const ACCOUNT: Address = address!("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
@@ -173,7 +176,9 @@ mod tests {
                 address: ACCOUNT,
                 window,
                 receipt_timeout,
-                workload: Arc::new(crate::workloads::Workload::Transfer(Transfer)),
+                workload: Arc::new(crate::workloads::Workload::Transfer(Transfer::new(
+                    Recipient::Sender,
+                ))),
                 pacer: Pacer::start(1_000.0),
                 fees,
                 events: event_tx,

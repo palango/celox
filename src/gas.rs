@@ -47,6 +47,22 @@ pub fn cip64_transfer(currency_intrinsic: u64) -> u64 {
     TRANSFER + currency_intrinsic
 }
 
+/// Upper bound on executing `transfer(address,uint256)` on an ERC-20.
+///
+/// Worst case is a recipient whose balance slot is still zero: 20_000 to set it
+/// plus 2_100 for touching it cold, the sender's own slot, a Transfer event and
+/// dispatch. Mento stables do more work than a plain ERC-20 — a debit/credit
+/// through their own accounting — so this is deliberately generous. Unused gas
+/// is refunded; an underestimate is an out-of-gas revert, which celox counts as
+/// a failed transaction.
+const ERC20_TRANSFER_EXECUTION: u64 = 100_000;
+
+/// A CIP-64 ERC-20 transfer: the fee-currency surcharge on top of a contract
+/// call carrying the `transfer` payload.
+pub fn cip64_erc20_transfer(currency_intrinsic: u64, payload: &[u8]) -> u64 {
+    contract_call(payload, ERC20_TRANSFER_EXECUTION) + currency_intrinsic
+}
+
 /// Upper bound for one storage slot written by `StateWriter.write`.
 ///
 /// A slot that is still zero costs the most: 20_000 to set it plus 2_100 for

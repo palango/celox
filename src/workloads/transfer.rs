@@ -44,10 +44,10 @@ impl Transfer {
     }
 }
 
-/// A uniformly random address. The 1 wei sent there is unrecoverable by
+/// A uniformly random address. Whatever is sent there is unrecoverable by
 /// construction, which is the point: an account below any plausible dust
 /// threshold, whose only purpose is to exist in the trie.
-fn fresh_address() -> Address {
+pub(crate) fn fresh_address() -> Address {
     let mut bytes = [0u8; 20];
     rand::rng().fill_bytes(&mut bytes);
     Address::from(bytes)

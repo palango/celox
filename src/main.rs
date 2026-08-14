@@ -46,8 +46,10 @@ struct Args {
     #[arg(long, value_enum, default_value_t = WorkloadKind::Transfer)]
     workload: WorkloadKind,
 
-    /// Where the `transfer` workload sends: `self` only burns gas, `fresh`
-    /// mints a brand-new account per transaction, growing the account trie
+    /// Destination mode for the `transfer` and `cip64` workloads. `self` only
+    /// burns gas; `fresh` targets a brand-new address per transaction, which
+    /// for `transfer` mints an account and for `cip64` sends 1 wei of the fee
+    /// currency, writing a balance slot that was zero
     #[arg(long, value_enum, default_value_t = Recipient::Sender)]
     recipient: Recipient,
 

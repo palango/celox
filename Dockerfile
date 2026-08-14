@@ -23,7 +23,13 @@ RUN mkdir src \
 COPY src ./src
 # The sol! macro reads this at compile time, relative to the manifest.
 COPY contracts/StateWriter.json ./contracts/StateWriter.json
-RUN cargo build --release --locked
+# Discard the stub's artifacts before rebuilding. COPY preserves the build
+# context's mtimes, so a checkout older than the stub build leaves cargo
+# believing target/release/celox is already up to date: it skips the rebuild
+# and the image ships the stub, a binary that prints nothing and exits 0.
+RUN rm -f target/release/celox target/release/deps/celox-* \
+    && touch src/main.rs \
+    && cargo build --release --locked
 
 FROM debian:bookworm-slim
 

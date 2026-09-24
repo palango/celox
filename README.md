@@ -109,7 +109,9 @@ The address is validated against the chain's FeeCurrencyDirectory — resolved
 through the Celo registry — and the per-currency intrinsic gas surcharge is read
 from there rather than guessed. `--fund-token` is how much of the token each
 sender is given, in whole tokens scaled by the token's own decimals; the root
-account must hold enough for every sender.
+account must hold enough for every sender. Fees are reserved in the token, so it
+is `--fund-token`, not `--fund`, that has to cover a full window of
+`gas_limit × max_fee`; celox warns when it does not.
 
 Adapter currencies (USDC, USDT) are rejected up front: they exist to present a
 6-decimal token as an 18-decimal fee currency, revert on `decimals()`, and cannot
@@ -183,7 +185,8 @@ Two settings matter away from localhost. `--fund` defaults to 0.1 CELO, which
 suits a dev chain with a negligible base fee; a chain with a real floor (Celo
 mainnet's is 200 gwei) needs one to two orders of magnitude more, because a node
 reserves `gas_limit × max_fee` for every pending transaction and celox will warn
-if the target cannot cover a full window. `--poll-interval` defaults to 250ms;
+if the target cannot cover a full window (for `cip64`, the same applies to
+`--fund-token`). `--poll-interval` defaults to 250ms;
 alloy would otherwise poll a remote endpoint every 7 seconds and quantise every
 measured latency to that. Note that polling is celox's own read load on the node
 under test — roughly one `eth_getTransactionReceipt` per in-flight transaction

@@ -30,6 +30,27 @@ pub struct TokenLeg {
     pub decimals: u8,
 }
 
+/// What a sender must hold to keep a full window pending: a node admits a
+/// transaction only if the sender can pay `gas_limit × max_fee` for it and for
+/// every transaction it already has pending, in the currency fees are paid in.
+pub fn window_reserve(window: usize, gas_limit: u64, max_fee: u128) -> U256 {
+    U256::from(window)
+        .saturating_mul(U256::from(gas_limit))
+        .saturating_mul(U256::from(max_fee))
+}
+
+/// The funding target in the currency the senders pay fees in, as the flag
+/// that sets it, its amount and its decimals.
+fn fee_paying_target(
+    native_target: U256,
+    token_leg: Option<&TokenLeg>,
+) -> (&'static str, U256, u8) {
+    match token_leg {
+        Some(leg) => ("--fund-token", leg.target, leg.decimals),
+        None => ("--fund", native_target, 18),
+    }
+}
+
 /// Tops every sender below its target back up to it from the root account —
 /// native CELO always, plus the fee-currency token when the workload pays gas
 /// in one. Root balances are shown first and both legs are checked for
@@ -44,7 +65,7 @@ pub async fn top_up(
     native_target: U256,
     token_leg: Option<&TokenLeg>,
     fees: FeeQuote,
-    window: usize,
+    window_reserve: U256,
 ) -> Result<()> {
     let root_native = provider.get_balance(root).await?;
     let root_token = match token_leg {
@@ -92,17 +113,15 @@ pub async fn top_up(
         );
     }
 
-    // A node reserves gas_limit * max_fee for every pending transaction, so a
-    // sender whose balance cannot cover its whole window has the tail rejected
-    // as underfunded. gas::TRANSFER is the floor — every workload costs at
-    // least that — so this is a lower bound on what a sender needs.
-    let window_reserve =
-        U256::from(window as u64 * gas::TRANSFER).saturating_mul(U256::from(fees.max_fee));
-    if native_target < window_reserve {
+    // A target below the reserve gets the tail of every window rejected, which
+    // the report would otherwise present as the chain's doing.
+    let (flag, target, decimals) = fee_paying_target(native_target, token_leg);
+    if target < window_reserve {
         warn!(
-            fund = %format_ether(native_target),
-            needed = %format_ether(window_reserve),
-            "--fund is below what a node reserves for a full window at the current fee; \
+            flag,
+            target = %format_units(target, decimals)?,
+            needed = %format_units(window_reserve, decimals)?,
+            "funding target is below what a node reserves for a full window at the current fee; \
              expect insufficient-funds rejections"
         );
     }
@@ -253,6 +272,31 @@ mod tests {
     }
 
     #[test]
+    fn a_window_reserves_its_full_fee_cap() {
+        // 10 × 21_000 gas × 1 gwei.
+        assert_eq!(
+            window_reserve(10, gas::TRANSFER, 1_000_000_000),
+            U256::from(210_000_000_000_000u64)
+        );
+    }
+
+    #[test]
+    fn the_token_target_pays_fees_when_there_is_a_fee_currency() {
+        let native = U256::from(100);
+        assert_eq!(fee_paying_target(native, None), ("--fund", native, 18));
+
+        let leg = TokenLeg {
+            token: Address::repeat_byte(0xce),
+            target: U256::from(5),
+            decimals: 6,
+        };
+        assert_eq!(
+            fee_paying_target(native, Some(&leg)),
+            ("--fund-token", U256::from(5), 6)
+        );
+    }
+
+    #[test]
     fn only_accounts_below_the_target_are_topped_up() {
         let target = U256::from(100);
         let balances = vec![U256::from(40), U256::from(100), U256::ZERO];
@@ -279,7 +323,7 @@ mod tests {
             U256::from(1_000_000_000_000_000_000u64),
             None,
             fees(),
-            10,
+            U256::ZERO,
         )
         .await
         .unwrap_err();
@@ -309,7 +353,7 @@ mod tests {
             U256::from(100_000_000_000_000_000u64),
             None,
             fees(),
-            10,
+            U256::ZERO,
         )
         .await
         .unwrap();

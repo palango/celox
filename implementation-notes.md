@@ -401,6 +401,27 @@ considering if our 6% over-provisioning or block-packing fidelity ever matters.
   with gas debited in the token. The CIP-64 run used the celo-reth binary
   already built in `../celo-kona` (the recipe does not rebuild it).
 
+### Window reserve in the fee-paying currency (2026-09-24)
+
+- The funder's window-reserve warning checked `--fund` against
+  `window × gas::TRANSFER × native max_fee` for every workload. In cip64 mode
+  that measured the wrong currency: celo-reth's pool (cumulative over the
+  pending set) and celo-revm since celo-kona 04b560d require
+  `gas_limit × maxFeePerGas` in the fee currency. `--fund-token` went unchecked.
+- Now `main.rs` passes `funder::window_reserve(window, workload gas, sender
+  max_fee)`, built from the workload's real gas limit (the representative
+  transaction already used for the block-gas check) and the senders' own fee
+  quote, so the check covers the token leg in cip64 mode and uses the real gas
+  limit instead of the 21k floor elsewhere. The fee refresher starts before
+  funding to supply that quote.
+- Stays a warning, not an error, as before.
+- Verified: 41/41 unit tests; `just e2e` 219/219, `just e2e-storage` 219/219,
+  `just e2e-cip64` 110/110, none warning at default funding. Paul ran
+  cip64 on the dev node with `--fund-token 0.001`: warning fired with
+  `needed=0.00278`, against the node's own per-tx requirement of ~0.000272
+  (×10 window = 0.00272); then 50 rejections, all "cumulative fee-currency
+  cost exceeds balance" / "insufficient fee-currency balance".
+
 ## Verification strategy (settled with Paul, 2026-08-07)
 
 - **anvil** for all non-CIP-64 work (M1–M3, M5 native mode): standard EIP-1559

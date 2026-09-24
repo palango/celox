@@ -89,7 +89,8 @@ struct Args {
     fund: String,
 
     /// Fee-currency balance each sender is topped up to at startup, in whole
-    /// tokens (scaled by the token's own decimals)
+    /// tokens (scaled by the token's own decimals). Fees are reserved from it,
+    /// so it must cover `--window` transactions at the fee-currency gas price
     #[arg(long, default_value = "1")]
     fund_token: String,
 
@@ -265,6 +266,11 @@ async fn run() -> Result<u8> {
         "this workload needs {workload_gas} gas per transaction but the chain's block gas limit is {block_gas_limit}"
     );
 
+    // Started before funding so the funder can check the targets against the
+    // fee the senders will actually pay.
+    let fees = fees::spawn_refresher(provider.clone(), fee_currency.map(|c| c.token)).await?;
+    let sender_max_fee = fees.borrow().max_fee;
+
     funder::top_up(
         &provider,
         root_address,
@@ -272,11 +278,9 @@ async fn run() -> Result<u8> {
         target_balance,
         token_leg.as_ref(),
         native_fees,
-        args.window,
+        funder::window_reserve(args.window, workload_gas, sender_max_fee),
     )
     .await?;
-
-    let fees = fees::spawn_refresher(provider.clone(), fee_currency.map(|c| c.token)).await?;
 
     let pacer = Pacer::start(args.tps);
     let (event_tx, event_rx) = mpsc::unbounded_channel();

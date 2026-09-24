@@ -384,6 +384,23 @@ considering if our 6% over-provisioning or block-packing fidelity ever matters.
   1 wei, nonce 0 and no code — one brand-new account per confirmed
   transaction.
 
+### Repin to celo-kona `73a4f75` (2026-09-24)
+
+- PR #266 was rebased onto celo-kona main (`c4cfd94`); new tip `73a4f75`.
+  Alloy moves `=2.0.5` → `=2.1.1`. celo-kona now uses caret alloy ranges, so
+  `alloy-serde` resolved to 2.5.0; held at 2.1.1 with
+  `cargo update -p alloy-serde --precise 2.1.1` to keep the family in step.
+- No source changes needed. The upstream `CeloGasFiller` rewrite (fees resolved
+  before the estimate, refusal of CIP-64 requests carrying `gasPrice` or an
+  authorization list) never runs for celox: every request arrives with nonce,
+  both fee fields and gas limit preset, so the fillers report `Finished`.
+- `cip64_max_fee` is still private upstream with an unchanged formula, so
+  `fees.rs` keeps its copy. Revisit when PR #266 merges.
+- Verified: `just` clean, 39/39 unit tests; `just e2e` 219/219,
+  `just e2e-storage` 220/220 with the slot check, `just e2e-cip64` 109/109
+  with gas debited in the token. The CIP-64 run used the celo-reth binary
+  already built in `../celo-kona` (the recipe does not rebuild it).
+
 ## Verification strategy (settled with Paul, 2026-08-07)
 
 - **anvil** for all non-CIP-64 work (M1–M3, M5 native mode): standard EIP-1559

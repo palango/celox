@@ -7,14 +7,14 @@ description = "Transaction load-testing tool for Celo chains"
 [dependencies]
 # Celo network support for alloy (CIP-64), from celo-kona PR #266.
 # Pinned to the pushed tip of palango/cip64-client-request; switch to main after merge.
-celo-alloy-network = { git = "https://github.com/celo-org/celo-kona", rev = "5bff854" }
-celo-alloy-rpc-types = { git = "https://github.com/celo-org/celo-kona", rev = "5bff854" }
+celo-alloy-network = { git = "https://github.com/celo-org/celo-kona", rev = "73a4f75" }
+celo-alloy-rpc-types = { git = "https://github.com/celo-org/celo-kona", rev = "73a4f75" }
 
 # Alloy family pinned to celo-kona's workspace versions to avoid trait-bound skew.
-alloy-contract = "=2.0.5"
-alloy-eips = "=2.0.5"
-alloy-provider = { version = "=2.0.5", features = ["reqwest"] }
-alloy-signer-local = "=2.0.5"
+alloy-contract = "=2.1.1"
+alloy-eips = "=2.1.1"
+alloy-provider = { version = "=2.1.1", features = ["reqwest"] }
+alloy-signer-local = "=2.1.1"
 alloy-primitives = "1.6.0"
 alloy-sol-types = { version = "1.6.0", features = ["json"] }
 
@@ -29,6 +29,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
-alloy-transport = "=2.0.5"
+alloy-transport = "=2.1.1"
 serde_json = "1"
 tokio = { version = "1.49", features = ["test-util"] }

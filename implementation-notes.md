@@ -434,3 +434,16 @@ considering if our 6% over-provisioning or block-packing fidelity ever matters.
 ## Deviations from plan
 
 (none yet)
+
+### Repin to celo-kona main `93ceeed` (2026-09-30)
+
+- PR #266 merged into celo-kona main as `93ceeed`; celox now pins that commit.
+- The only crate change since `73a4f75` is `CeloTransactionRequest`'s
+  deserializer, which now rejects duplicate keys. celox only serializes
+  requests, so nothing changes for it. Workspace alloy versions are unchanged;
+  `alloy-serde` stays at 2.1.1 in the lockfile.
+- `cip64_max_fee` is still private upstream with the same formula, so
+  `fees.rs` keeps its copy. Making it public would need a new celo-kona PR.
+- Verified: `just` clean, 41/41 unit tests; `just e2e` 220/220,
+  `just e2e-storage` 220/220 with the slot check, `just e2e-cip64` 110/110
+  with gas debited in the fee currency.

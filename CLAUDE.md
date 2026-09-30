@@ -86,8 +86,7 @@ workload, not a flag that applies to all workloads.
 
 ## Dependencies
 
-`celo-alloy-{network,rpc-types}` are git-pinned to celo-kona rev `73a4f75` — the tip of
-PR #266, which adds CIP-64 client support. The alloy family is pinned to `=2.1.1` to
-match it (`alloy-serde`, a transitive dep, is held there in `Cargo.lock`). No `[patch.crates-io]` block is needed. Repin
-to `main` once that PR merges, and revisit whether `cip64_max_fee` can be consumed from
-upstream instead of the copy in `fees.rs`.
+`celo-alloy-{network,rpc-types}` are git-pinned to celo-kona main at `93ceeed`, the merge
+of PR #266 (CIP-64 client support). The alloy family is pinned to `=2.1.1` to match it
+(`alloy-serde`, a transitive dep, is held there in `Cargo.lock`). No `[patch.crates-io]`
+block is needed. Upstream's `cip64_max_fee` is private, so `fees.rs` keeps its own copy.

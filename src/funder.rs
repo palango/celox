@@ -18,10 +18,6 @@ use crate::{
     lane::{Lane, MAX_WINDOW, Submitted},
 };
 
-/// Upper bound for one ERC-20 `transfer`, not an exact price: the cost depends
-/// on whether the recipient's balance slot is fresh. Unused gas is refunded.
-const ERC20_TRANSFER_GAS: u64 = 100_000;
-
 /// The fee-currency leg of funding: senders paying gas in `token` get topped
 /// up to `target` of it. `decimals` is only for display.
 pub struct TokenLeg {
@@ -88,11 +84,36 @@ pub async fn top_up(
         None => Vec::new(),
     };
 
+    let mut requests = Vec::with_capacity(native_topups.len() + token_topups.len());
+    for (address, amount) in &native_topups {
+        requests.push(
+            CeloTransactionRequest::default()
+                .to(*address)
+                .value(*amount)
+                .gas_limit(gas::TRANSFER),
+        );
+    }
+    if let Some(leg) = token_leg {
+        for (address, amount) in &token_topups {
+            let request = celo::erc20_transfer(provider, leg.token, *address, *amount);
+            let payload = request
+                .inner
+                .as_ref()
+                .input
+                .input()
+                .cloned()
+                .unwrap_or_default();
+            requests.push(request.gas_limit(gas::erc20_transfer(&payload)));
+        }
+    }
+
     // Solvency for both legs before the first send: funding must be all or
     // nothing, not a partial airdrop that dies halfway.
     let native_total: U256 = native_topups.iter().map(|(_, amount)| *amount).sum();
-    let funding_gas = U256::from(native_topups.len() as u64 * gas::TRANSFER)
-        + U256::from(token_topups.len() as u64 * ERC20_TRANSFER_GAS);
+    let funding_gas: U256 = requests
+        .iter()
+        .map(|request| U256::from(request.inner.as_ref().gas.unwrap_or_default()))
+        .sum();
     let native_needed = native_total + funding_gas * U256::from(fees.max_fee);
     ensure!(
         root_native >= native_needed,
@@ -126,27 +147,9 @@ pub async fn top_up(
         );
     }
 
-    if native_topups.is_empty() && token_topups.is_empty() {
+    if requests.is_empty() {
         info!("all senders already funded");
         return Ok(());
-    }
-
-    let mut requests = Vec::with_capacity(native_topups.len() + token_topups.len());
-    for (address, amount) in &native_topups {
-        requests.push(
-            CeloTransactionRequest::default()
-                .to(*address)
-                .value(*amount)
-                .gas_limit(gas::TRANSFER),
-        );
-    }
-    if let Some(leg) = token_leg {
-        for (address, amount) in &token_topups {
-            requests.push(
-                celo::erc20_transfer(provider, leg.token, *address, *amount)
-                    .gas_limit(ERC20_TRANSFER_GAS),
-            );
-        }
     }
 
     // The funder is a single account (root), so one lane bounds its in-flight

@@ -39,7 +39,7 @@ shutdown that could not drain), `130` interrupted.
 docker build -t celox .
 docker run --rm -e CELOX_PRIVATE_KEY \
     celox --rpc-url https://forno.celo-sepolia.celo-testnet.org \
-          --tps 20 --senders 10 --duration 30s
+    --tps 20 --senders 10 --duration 30s
 ```
 
 The image carries only the binary and a trust store; the build needs no Solidity
@@ -96,14 +96,33 @@ push bandwidth, block-size limits and the propagation path rather than execution
 
 ### `cip64` — fee-currency transactions
 
-A self-transfer whose gas is paid in an ERC-20 rather than CELO, as a type-`0x7b`
+A transaction whose gas is paid in an ERC-20 rather than CELO, as a type-`0x7b`
 transaction. This is the workload that exercises Celo's alternative-fee path end
 to end: the directory lookup, the debit before execution and the credit after.
+`--recipient` decides what the transaction does on top of that:
 
 ```sh
 # Celo Sepolia, paying fees in cUSD
-celox --rpc-url https://forno.celo-sepolia.celo-testnet.org       --workload cip64       --fee-currency 0xEF4d55D6dE8e8d73232827Cd1e9b2F2dBb45bC80       --fund-token 5 --tps 20 --senders 10 --duration 1m
+celox --rpc-url https://forno.celo-sepolia.celo-testnet.org \
+    --workload cip64 \
+    --fee-currency 0xEF4d55D6dE8e8d73232827Cd1e9b2F2dBb45bC80 \
+    --fund-token 5 --tps 20 --senders 10 --duration 1m
+
+# Same, but each transaction also sends 1 wei of cUSD to a brand-new address
+celox --rpc-url https://forno.celo-sepolia.celo-testnet.org \
+    --workload cip64 --recipient fresh \
+    --fee-currency 0xEF4d55D6dE8e8d73232827Cd1e9b2F2dBb45bC80 \
+    --fund-token 5 --tps 20 --senders 10 --duration 1m
 ```
+
+`self` (the default) is a 1-wei native self-transfer, so the fee path is all it
+exercises. `fresh` calls `transfer(random_address, 1)` on the fee-currency token
+itself, which writes a balance slot that was zero and grows the token's storage
+trie once per transaction, on top of the fee debit and credit. Its gas limit
+carries a 100,000-gas upper bound on the transfer's execution, about four times
+what a cUSD transfer to a new address uses; because fees are reserved against the gas limit, that
+headroom raises the `--fund-token` a full window needs, though unused gas is
+refunded.
 
 The address is validated against the chain's FeeCurrencyDirectory — resolved
 through the Celo registry — and the per-currency intrinsic gas surcharge is read
@@ -200,6 +219,7 @@ just test         # unit tests
 just e2e          # transfer workload against a throwaway anvil
 just e2e-storage  # storage workload; asserts the contract's slot equals the confirmed count
 just e2e-cip64    # CIP-64 against a celo-reth dev node from ../celo-kona
+just e2e-cip64 fresh   # same with --recipient fresh; checks every recipient got 1 wei
 just build-contracts   # recompile Solidity and refresh the committed artifacts
 just docker-build      # build the container image
 ```

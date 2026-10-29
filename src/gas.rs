@@ -47,6 +47,29 @@ pub fn cip64_transfer(currency_intrinsic: u64) -> u64 {
     TRANSFER + currency_intrinsic
 }
 
+/// Upper bound on executing `transfer(address,uint256)` on an ERC-20.
+///
+/// Worst case is a recipient whose balance slot is still zero: 20_000 to set it
+/// plus 2_100 for touching it cold, the sender's own slot, a Transfer event and
+/// dispatch. A fresh-recipient transfer measured about 25_000 of execution both
+/// on cUSD (mainnet state) and on the celo-reth dev node's fee currency. Fee
+/// currencies are often proxies, which add a cold delegatecall and an
+/// implementation-slot load on top, so this keeps roughly four times the
+/// measured cost. Unused gas is refunded; an underestimate is an out-of-gas
+/// revert, which celox counts as a failed transaction.
+const ERC20_TRANSFER_EXECUTION: u64 = 100_000;
+
+/// An ERC-20 transaction carrying the `transfer` payload.
+pub fn erc20_transfer(payload: &[u8]) -> u64 {
+    contract_call(payload, ERC20_TRANSFER_EXECUTION)
+}
+
+/// A CIP-64 ERC-20 transfer: the fee-currency surcharge on top of an ERC-20
+/// `transfer`.
+pub fn cip64_erc20_transfer(currency_intrinsic: u64, payload: &[u8]) -> u64 {
+    erc20_transfer(payload) + currency_intrinsic
+}
+
 /// Upper bound for one storage slot written by `StateWriter.write`.
 ///
 /// A slot that is still zero costs the most: 20_000 to set it plus 2_100 for
@@ -91,6 +114,29 @@ mod tests {
     #[test]
     fn prices_cip64_as_transfer_plus_surcharge() {
         assert_eq!(cip64_transfer(50_000), 71_000);
+    }
+
+    #[test]
+    fn prices_an_erc20_transfer_from_its_payload() {
+        // Selector, address word, amount word: execution dominates the floor,
+        // so the standard price applies.
+        let payload = [0xff; 68];
+        assert_eq!(
+            erc20_transfer(&payload),
+            21_000 + 4 * 272 + ERC20_TRANSFER_EXECUTION
+        );
+        // Zero bytes in the address word make the same call cheaper.
+        let mut sparse = payload;
+        sparse[4..36].fill(0);
+        assert_eq!(
+            erc20_transfer(&payload) - erc20_transfer(&sparse),
+            4 * 3 * 32
+        );
+        // CIP-64 adds the currency's surcharge and nothing else.
+        assert_eq!(
+            cip64_erc20_transfer(50_000, &payload),
+            erc20_transfer(&payload) + 50_000
+        );
     }
 
     #[test]

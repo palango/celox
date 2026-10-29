@@ -15,7 +15,7 @@
 mod calldata;
 mod cip64;
 mod storage;
-mod transfer;
+pub(crate) mod transfer;
 
 use alloy_primitives::Address;
 use alloy_provider::DynProvider;
@@ -36,7 +36,8 @@ pub enum WorkloadKind {
     Transfer,
     /// Random calldata to a burner account
     Calldata,
-    /// 1-wei self-transfers paying gas in a fee currency (CIP-64)
+    /// Gas paid in a fee currency (CIP-64); --recipient picks a 1-wei native
+    /// self-transfer or a 1-wei transfer of the fee currency to a fresh address
     Cip64,
     /// Storage writes against one shared contract
     Storage,
@@ -70,6 +71,7 @@ impl Workload {
                 config
                     .fee_currency
                     .ok_or_eyre("the cip64 workload needs a resolved fee currency")?,
+                config.recipient,
             )),
             WorkloadKind::Storage => {
                 Self::Storage(Storage::deploy(root, config.writes, config.key_space).await?)

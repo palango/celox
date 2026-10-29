@@ -4,16 +4,17 @@ use rand::Rng;
 
 use crate::gas;
 
-/// Where a transfer sends its 1 wei. The transaction is identical either way —
-/// 21,000 gas, no calldata — so the mode chooses what state pressure the run
-/// applies, not what it costs.
+/// Where the `transfer` and `cip64` workloads send their 1 wei. For `transfer`
+/// the transaction is identical either way — 21,000 gas, no calldata — so the
+/// mode chooses what state pressure the run applies, not what it costs; `cip64`
+/// documents its own modes.
 #[derive(Clone, Copy, Debug, PartialEq, clap::ValueEnum)]
 pub enum Recipient {
     /// The sender itself: burns gas without touching any other account.
     #[value(name = "self")]
     Sender,
-    /// A fresh random address per transaction: every transfer mints a
-    /// brand-new account, growing the account trie by one leaf.
+    /// A fresh random address per transaction: `transfer` mints a brand-new
+    /// account, `cip64` writes a new balance slot in the fee-currency token.
     Fresh,
 }
 
@@ -44,10 +45,10 @@ impl Transfer {
     }
 }
 
-/// A uniformly random address. The 1 wei sent there is unrecoverable by
+/// A uniformly random address. Whatever is sent there is unrecoverable by
 /// construction, which is the point: an account below any plausible dust
 /// threshold, whose only purpose is to exist in the trie.
-fn fresh_address() -> Address {
+pub(crate) fn fresh_address() -> Address {
     let mut bytes = [0u8; 20];
     rand::rng().fill_bytes(&mut bytes);
     Address::from(bytes)

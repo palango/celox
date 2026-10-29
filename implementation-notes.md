@@ -447,3 +447,31 @@ considering if our 6% over-provisioning or block-packing fidelity ever matters.
 - Verified: `just` clean, 41/41 unit tests; `just e2e` 220/220,
   `just e2e-storage` 220/220 with the slot check, `just e2e-cip64` 110/110
   with gas debited in the fee currency.
+
+### cip64 `--recipient fresh` (2026-10-29, PR #2 by jcortejoso)
+
+- `fresh` makes each CIP-64 transaction call `transfer(random_address, 1)` on
+  the fee-currency token, which grows that token's storage trie. It moves the
+  fee currency rather than another ERC-20 because the funder already tops
+  senders up with it.
+- Gas: `gas::erc20_transfer` prices the payload with a 100,000 execution bound.
+  Measured gas used for a fresh-recipient transaction is 96,624–96,636 on the
+  celo-reth dev node (0x…ce16, 50k surcharge; a `self` transaction uses exactly
+  71,000) and 96,640 for cUSD on a mainnet fork (from the PR). That is about
+  25k of execution, so the bound keeps roughly four times as much for proxy
+  tokens. The cost: fees are reserved against the gas limit, so `--fund-token`
+  must cover a larger window. Not measured on Celo Sepolia.
+- The funder's own `ERC20_TRANSFER_GAS = 100_000` was a total gas limit for the
+  same call. It now uses `gas::erc20_transfer` from each top-up's calldata,
+  which raises the limit to about 122k. The requests are built before the
+  solvency check so it sums their real gas limits.
+- Not reserved: the 1 wei of token each fresh transaction sends. The window
+  check covers fees only; `window` wei is negligible next to them.
+- `--recipient` is still ignored by `calldata` and `storage`, as before.
+- e2e: `just e2e-cip64 fresh` also checks that the number of distinct
+  recipients of 1-wei token Transfers equals the confirmed count, and that each
+  holds exactly 1 wei.
+- Verified: 44/44 unit tests; `just e2e-cip64` 109/109; `just e2e-cip64 fresh`
+  110/110 with 110 distinct recipients holding 1 wei each. `just` fails on
+  clippy under rustc 1.99 because of eyre 0.6.12's `bail!` (on main too);
+  clippy is clean with that one lint allowed.

@@ -72,7 +72,8 @@ e2e-storage:
 
 # CIP-64 e2e against a celo-reth dev node (chain 1337, built from ../celo-kona).
 # Root = the dev account pre-funded with CELO and the 0x…ce16 fee currency.
-e2e-cip64:
+# `just e2e-cip64 fresh` runs --recipient fresh and also checks the recipients.
+e2e-cip64 recipient="self":
     #!/usr/bin/env bash
     set -euo pipefail
     KONA="${KONA:-$(dirname "$(pwd)")/celo-kona}"
@@ -95,10 +96,10 @@ e2e-cip64:
         cast block-number --rpc-url $RPC &>/dev/null && break
         sleep 0.5
     done
-    CELOX_PRIVATE_KEY=0x2771aff413cac48d9f8c114fabddd9195a2129f3c2c436caa07e27bb7f58ead5 \
+    OUT=$(NO_COLOR=1 CELOX_PRIVATE_KEY=0x2771aff413cac48d9f8c114fabddd9195a2129f3c2c436caa07e27bb7f58ead5 \
         cargo run -q -- --rpc-url $RPC \
-        --workload cip64 --fee-currency $FC \
-        --tps 10 --senders 10 --duration 10s
+        --workload cip64 --fee-currency $FC --recipient {{recipient}} \
+        --tps 10 --senders 10 --duration 10s 2>&1 | tee /dev/stderr)
     # Sender 0 derives deterministically from the dev key, so its address is
     # stable. Gas paid in the fee currency must have debited its token balance
     # below the funded target of 1e18.
@@ -109,3 +110,28 @@ e2e-cip64:
         exit 1
     fi
     echo "OK: sender0 fee-currency balance $BAL (< funded 1e18, gas debited in token)"
+    if [[ "{{recipient}}" == fresh ]]; then
+        # Every confirmed transaction must have moved exactly 1 wei of the token
+        # to an address that held none: as many distinct recipients of 1-wei
+        # Transfers as confirmed transactions, each holding exactly 1 wei.
+        CONFIRMED=$(echo "$OUT" | sed -n 's/.*run finished.*confirmed=\([0-9]*\).*/\1/p')
+        [[ "$CONFIRMED" =~ ^[1-9][0-9]*$ ]] || { echo "ERROR: no confirmed count in celox's summary"; exit 1; }
+        ONE=0x0000000000000000000000000000000000000000000000000000000000000001
+        RECIPIENTS=$(cast logs --rpc-url $RPC --address $FC --from-block 0 --json \
+            'Transfer(address indexed,address indexed,uint256)' \
+            | jq -r --arg one $ONE '.[] | select(.data == $one) | .topics[2]' | sort -u)
+        COUNT=$(echo "$RECIPIENTS" | rg -c . || echo 0)
+        if [[ $COUNT -ne $CONFIRMED ]]; then
+            echo "ERROR: $COUNT distinct 1-wei token recipients after $CONFIRMED confirmed transactions"
+            exit 1
+        fi
+        for TOPIC in $RECIPIENTS; do
+            ADDR=0x${TOPIC:26}
+            HELD=$(cast call --rpc-url $RPC $FC 'balanceOf(address) returns (uint256)' $ADDR | awk '{print $1}')
+            if [[ "$HELD" != 1 ]]; then
+                echo "ERROR: recipient $ADDR holds '$HELD' of the token; expected exactly 1"
+                exit 1
+            fi
+        done
+        echo "OK: $CONFIRMED confirmed transactions, $COUNT fresh recipients holding 1 wei each"
+    fi

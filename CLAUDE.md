@@ -13,6 +13,7 @@ just test              # unit tests
 just e2e               # transfer workload against a throwaway anvil
 just e2e-storage       # storage workload; asserts the contract slot equals the confirmed count
 just e2e-cip64         # CIP-64 against a celo-reth dev node built from ../celo-kona
+just e2e-cip64 fresh   # same with --recipient fresh; checks each recipient holds 1 wei
 just build-contracts   # recompile Solidity, refresh the committed artifacts
 ```
 

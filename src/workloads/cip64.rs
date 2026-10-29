@@ -29,7 +29,8 @@ use crate::{
 pub struct Cip64 {
     fee_currency: Address,
     recipient: Recipient,
-    native_gas_limit: u64,
+    /// The FeeCurrencyDirectory's surcharge for `fee_currency`.
+    currency_intrinsic: u64,
 }
 
 impl Cip64 {
@@ -37,7 +38,7 @@ impl Cip64 {
         Self {
             fee_currency: fee_currency.token,
             recipient,
-            native_gas_limit: gas::cip64_transfer(fee_currency.intrinsic_gas),
+            currency_intrinsic: fee_currency.intrinsic_gas,
         }
     }
 
@@ -46,7 +47,7 @@ impl Cip64 {
             Recipient::Sender => CeloTransactionRequest::default()
                 .to(sender)
                 .value(U256::from(1))
-                .gas_limit(self.native_gas_limit)
+                .gas_limit(gas::cip64_transfer(self.currency_intrinsic))
                 .fee_currency(self.fee_currency),
             Recipient::Fresh => {
                 let payload = IErc20::transferCall {
@@ -57,8 +58,7 @@ impl Cip64 {
                 // Priced from the payload rather than a constant: the intrinsic
                 // cost depends on how many zero bytes the encoded address
                 // happens to have, and a random address is not fixed.
-                let gas_limit =
-                    gas::cip64_erc20_transfer(self.native_gas_limit - gas::TRANSFER, &payload);
+                let gas_limit = gas::cip64_erc20_transfer(self.currency_intrinsic, &payload);
                 CeloTransactionRequest::default()
                     .to(self.fee_currency)
                     .input(Bytes::from(payload).into())

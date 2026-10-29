@@ -384,6 +384,44 @@ considering if our 6% over-provisioning or block-packing fidelity ever matters.
   1 wei, nonce 0 and no code — one brand-new account per confirmed
   transaction.
 
+### Repin to celo-kona `73a4f75` (2026-09-24)
+
+- PR #266 was rebased onto celo-kona main (`c4cfd94`); new tip `73a4f75`.
+  Alloy moves `=2.0.5` → `=2.1.1`. celo-kona now uses caret alloy ranges, so
+  `alloy-serde` resolved to 2.5.0; held at 2.1.1 with
+  `cargo update -p alloy-serde --precise 2.1.1` to keep the family in step.
+- No source changes needed. The upstream `CeloGasFiller` rewrite (fees resolved
+  before the estimate, refusal of CIP-64 requests carrying `gasPrice` or an
+  authorization list) never runs for celox: every request arrives with nonce,
+  both fee fields and gas limit preset, so the fillers report `Finished`.
+- `cip64_max_fee` is still private upstream with an unchanged formula, so
+  `fees.rs` keeps its copy. Revisit when PR #266 merges.
+- Verified: `just` clean, 39/39 unit tests; `just e2e` 219/219,
+  `just e2e-storage` 220/220 with the slot check, `just e2e-cip64` 109/109
+  with gas debited in the token. The CIP-64 run used the celo-reth binary
+  already built in `../celo-kona` (the recipe does not rebuild it).
+
+### Window reserve in the fee-paying currency (2026-09-24)
+
+- The funder's window-reserve warning checked `--fund` against
+  `window × gas::TRANSFER × native max_fee` for every workload. In cip64 mode
+  that measured the wrong currency: celo-reth's pool (cumulative over the
+  pending set) and celo-revm since celo-kona 04b560d require
+  `gas_limit × maxFeePerGas` in the fee currency. `--fund-token` went unchecked.
+- Now `main.rs` passes `funder::window_reserve(window, workload gas, sender
+  max_fee)`, built from the workload's real gas limit (the representative
+  transaction already used for the block-gas check) and the senders' own fee
+  quote, so the check covers the token leg in cip64 mode and uses the real gas
+  limit instead of the 21k floor elsewhere. The fee refresher starts before
+  funding to supply that quote.
+- Stays a warning, not an error, as before.
+- Verified: 41/41 unit tests; `just e2e` 219/219, `just e2e-storage` 219/219,
+  `just e2e-cip64` 110/110, none warning at default funding. Paul ran
+  cip64 on the dev node with `--fund-token 0.001`: warning fired with
+  `needed=0.00278`, against the node's own per-tx requirement of ~0.000272
+  (×10 window = 0.00272); then 50 rejections, all "cumulative fee-currency
+  cost exceeds balance" / "insufficient fee-currency balance".
+
 ## Verification strategy (settled with Paul, 2026-08-07)
 
 - **anvil** for all non-CIP-64 work (M1–M3, M5 native mode): standard EIP-1559
@@ -396,3 +434,16 @@ considering if our 6% over-provisioning or block-packing fidelity ever matters.
 ## Deviations from plan
 
 (none yet)
+
+### Repin to celo-kona main `93ceeed` (2026-09-30)
+
+- PR #266 merged into celo-kona main as `93ceeed`; celox now pins that commit.
+- The only crate change since `73a4f75` is `CeloTransactionRequest`'s
+  deserializer, which now rejects duplicate keys. celox only serializes
+  requests, so nothing changes for it. Workspace alloy versions are unchanged;
+  `alloy-serde` stays at 2.1.1 in the lockfile.
+- `cip64_max_fee` is still private upstream with the same formula, so
+  `fees.rs` keeps its copy. Making it public would need a new celo-kona PR.
+- Verified: `just` clean, 41/41 unit tests; `just e2e` 220/220,
+  `just e2e-storage` 220/220 with the slot check, `just e2e-cip64` 110/110
+  with gas debited in the fee currency.

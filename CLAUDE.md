@@ -87,7 +87,10 @@ workload, not a flag that applies to all workloads.
 
 ## Dependencies
 
-`celo-alloy-{network,rpc-types}` are git-pinned to celo-kona main at `93ceeed`, the merge
-of PR #266 (CIP-64 client support). The alloy family is pinned to `=2.1.1` to match it
-(`alloy-serde`, a transitive dep, is held there in `Cargo.lock`). No `[patch.crates-io]`
-block is needed. Upstream's `cip64_max_fee` is private, so `fees.rs` keeps its own copy.
+`celo-alloy-{network,rpc-types}` are git-pinned to celo-kona main at `82d6de6`, the last
+commit that builds without celo-kona's `[patch.crates-io]`: from `618bcc4` on,
+celo-alloy-consensus needs `decode_2718_canonical` from celo-kona's op-alloy fork
+(celo-org/optimism), which crates.io's op-alloy-consensus lacks. Moving past it means
+copying that patch. Alloy crates use caret ranges at celo-kona's minimum (`2.3`);
+`Cargo.lock` keeps the whole family at one version. Upstream's `cip64_max_fee` is
+private, so `fees.rs` keeps its own copy.

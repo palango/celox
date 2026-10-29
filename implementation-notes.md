@@ -475,3 +475,25 @@ considering if our 6% over-provisioning or block-packing fidelity ever matters.
   110/110 with 110 distinct recipients holding 1 wei each. `just` fails on
   clippy under rustc 1.99 because of eyre 0.6.12's `bail!` (on main too);
   clippy is clean with that one lint allowed.
+
+### Dependency refresh, repin to celo-kona `82d6de6` (2026-10-29)
+
+- rustc 1.99 flags eyre 0.6.12's `bail!` (trailing semicolon in a match arm),
+  failing `just`; eyre 0.6.14 drops the semicolon.
+- Alloy `=2.1.1` pins dropped for caret `2.3` (celo-kona main's minimum). The
+  exact pins dated from celo-kona's own `=2.0.5` pins at `5bff854`; once
+  celo-kona moved to caret ranges they only held five direct crates while the
+  rest floated (alloy-json-rpc and alloy-signer were at 2.3.0), which is what
+  the `alloy-serde` hold patched over. Paul's call: drop them. Lockfile now has
+  every alloy 2.x crate at 2.5.0.
+- **Deviation:** asked to pin celo-kona main's tip (`e840ddc`), but from
+  `618bcc4` celo-alloy-consensus re-exports `decode_2718_canonical` from
+  op-alloy-consensus, which only celo-kona's patched fork (celo-org/optimism
+  `c9d5a6d`) has; crates.io stops at 2.0.0 without it. `618bcc4^` = `90047d7`
+  does not build either: it deleted `canonical.rs` but kept `mod canonical`.
+  Paul chose the last commit before the re-export over adding the patch, so
+  celox pins `82d6de6` (merge of #256), the last that builds.
+- `cip64_max_fee` still private at `82d6de6`.
+- Verified: `just` clean, 44/44 unit tests; `just e2e` 220/220,
+  `just e2e-storage` 219/219 with the slot check, `just e2e-cip64` 110/110,
+  `just e2e-cip64 fresh` 110/110 with 110 fresh recipients at 1 wei.

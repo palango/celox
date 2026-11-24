@@ -85,6 +85,51 @@ pub fn state_writes(payload: &[u8], writes: u64) -> u64 {
     contract_call(payload, CALL_OVERHEAD + writes * STATE_WRITE)
 }
 
+/// Upper bound for one `StateProber.probeAccounts` read: a cold `BALANCE`
+/// (2_600) plus the key derivation and loop. Measured 2026-11-24 at 200 reads:
+/// ~2_910 per read on anvil and ~2_934 against mainnet state (scion fork
+/// scale1, `eth_estimateGas` with the prober as a state override); this is the
+/// larger plus 25%.
+const COLD_ACCOUNT_READ: u64 = 3_700;
+
+/// Upper bound for one `StateProber.probeToken` read: a warm call into the
+/// token, its cold balance slot (2_100) and, for a proxy, the delegatecall.
+/// Measured 2026-11-24 at 200 reads: ~3_300 per read on the celo-reth dev
+/// node's fee currency and ~4_336 on cUSD against mainnet state (scale1, as
+/// above; cUSD is a proxy); this is the larger plus 25%.
+const COLD_TOKEN_READ: u64 = 5_500;
+
+/// Fixed execution of a probe call beyond its per-read cost: dispatch, and for
+/// a token the first call's cold token account, implementation slot and
+/// implementation account (~7_300). Kept loose since it is paid once per
+/// transaction; unused gas is refunded.
+const PROBE_BASE: u64 = 30_000;
+
+/// A `probeAccounts` transaction making `reads` cold account reads.
+pub fn cold_account_reads(payload: &[u8], reads: u64) -> u64 {
+    contract_call(payload, PROBE_BASE + reads * COLD_ACCOUNT_READ)
+}
+
+/// A `probeToken` transaction making `reads` cold token-balance reads.
+pub fn cold_token_reads(payload: &[u8], reads: u64) -> u64 {
+    contract_call(payload, PROBE_BASE + reads * COLD_TOKEN_READ)
+}
+
+/// Upper bound on executing a deploy through the CREATE2 deployer: the CREATE
+/// itself (32_000), hashing and metering the init code (6 + 2 gas a word),
+/// copying it, and depositing the runtime code at 200 a byte, bounded by the
+/// init code's length since the runtime is part of it. The margin covers the
+/// deployer's own few opcodes and a constructor; the workload contracts have
+/// none.
+const CREATE2_MARGIN: u64 = 30_000;
+
+/// A deploy through the CREATE2 deployer carrying `salt ‖ init_code`.
+pub fn create2_deploy(payload: &[u8], init_code_len: usize) -> u64 {
+    let len = init_code_len as u64;
+    let words = len.div_ceil(32);
+    contract_call(payload, 32_000 + 11 * words + 200 * len + CREATE2_MARGIN)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,5 +191,18 @@ mod tests {
         let two = state_writes(&payload, 2);
         assert_eq!(two - one, STATE_WRITE);
         assert!(one > TRANSFER + STATE_WRITE);
+    }
+
+    #[test]
+    fn cold_read_gas_scales_with_reads() {
+        let payload = [0xab; 100];
+        assert_eq!(
+            cold_account_reads(&payload, 201) - cold_account_reads(&payload, 200),
+            COLD_ACCOUNT_READ
+        );
+        assert_eq!(
+            cold_token_reads(&payload, 201) - cold_token_reads(&payload, 200),
+            COLD_TOKEN_READ
+        );
     }
 }

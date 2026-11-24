@@ -95,6 +95,16 @@ impl Summary {
 }
 
 /// Consumes events until all senders hang up, printing a status line every 5s.
+/// The process exit code: the summary's, except that a prefill which did not
+/// hand out its whole range also fails, since its state is not ready to measure.
+pub fn exit_code(summary: &Summary, prefill_incomplete: bool) -> u8 {
+    if prefill_incomplete {
+        1
+    } else {
+        summary.exit_code() as u8
+    }
+}
+
 pub fn spawn(mut events: mpsc::UnboundedReceiver<Event>) -> JoinHandle<Summary> {
     tokio::spawn(async move {
         let started = Instant::now();
@@ -198,6 +208,16 @@ mod tests {
             s.record(event);
         }
         assert_eq!(s.exit_code(), 1);
+    }
+
+    #[test]
+    fn exit_code_fails_an_incomplete_prefill() {
+        let mut s = Summary::default();
+        for event in [Event::Sent, confirmed(100)] {
+            s.record(event);
+        }
+        assert_eq!(exit_code(&s, false), 0);
+        assert_ne!(exit_code(&s, true), 0);
     }
 
     #[test]

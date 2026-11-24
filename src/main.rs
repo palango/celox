@@ -72,6 +72,12 @@ struct Args {
     #[arg(long, default_value_t = 1)]
     contracts: u64,
 
+    /// Write every slot of the `storage` key range once, chunk by chunk, then
+    /// stop by itself. Resumable: a re-run sends only the chunks still unwritten.
+    /// Needs --salt, which the measured runs afterwards pass too
+    #[arg(long)]
+    prefill: bool,
+
     /// Share workload contracts across runs: the same salt deploys to, and
     /// reuses, the same addresses. Default: random, so each run gets fresh ones
     #[arg(long)]
@@ -175,7 +181,17 @@ async fn run() -> Result<u8> {
         "--writes must be between 1 and 10000"
     );
     ensure!(args.key_space > 0, "--key-space must be at least 1");
-    workloads::storage::check(args.writes, args.key_space, args.contracts)?;
+    workloads::storage::check(
+        args.writes,
+        args.key_space,
+        args.contracts,
+        args.prefill,
+        args.salt,
+    )?;
+    ensure!(
+        !args.prefill || args.workload == WorkloadKind::Storage,
+        "--prefill only applies to the storage workload"
+    );
     ensure!(
         args.workload == WorkloadKind::Cip64 || args.fee_currency.is_none(),
         "--fee-currency only applies to the cip64 workload"
@@ -262,17 +278,22 @@ async fn run() -> Result<u8> {
                 key_space: args.key_space,
                 salt,
                 contracts: args.contracts,
+                prefill: args.prefill,
             },
             &provider,
         )
         .await?,
     );
+    if workload.is_exhausted() {
+        info!("prefill: nothing left to write");
+        return Ok(0);
+    }
 
     // Ask the workload for a representative transaction: if its gas limit
     // exceeds the block gas limit every send would be rejected, so fail before
     // funding rather than after paying for it.
     let workload_gas = workload
-        .next(root_address)
+        .sample(root_address)
         .inner
         .as_ref()
         .gas
@@ -332,17 +353,22 @@ async fn run() -> Result<u8> {
         "spamming"
     );
 
-    match args.duration {
-        Some(duration) => {
-            tokio::select! {
-                _ = tokio::time::sleep(duration) => info!("duration elapsed, draining"),
-                _ = tokio::signal::ctrl_c() => info!("interrupted, draining"),
-            }
+    let deadline = async {
+        match args.duration {
+            Some(duration) => tokio::time::sleep(duration).await,
+            None => std::future::pending().await,
         }
-        None => {
-            let _ = tokio::signal::ctrl_c().await;
-            info!("interrupted, draining");
+    };
+    // ponytail: polls; a prefill runs for hours, so 200ms of lag is noise.
+    let exhausted = async {
+        while !workload.is_exhausted() {
+            tokio::time::sleep(Duration::from_millis(200)).await;
         }
+    };
+    tokio::select! {
+        _ = deadline => info!("duration elapsed, draining"),
+        _ = tokio::signal::ctrl_c() => info!("interrupted, draining"),
+        _ = exhausted => info!("prefill: every pending chunk handed out, draining"),
     }
     // Cannot fail while main's own stop_rx binding is alive, but never let a
     // refactor of that binding skip the summary.
@@ -385,9 +411,19 @@ async fn run() -> Result<u8> {
         }
     }
     let summary = reporter.await?;
+    let prefill_incomplete = match workload.prefill_remaining() {
+        Some(remaining) if remaining > 0 => {
+            warn!(
+                remaining,
+                "prefill incomplete: re-run the same command to resume"
+            );
+            true
+        }
+        _ => false,
+    };
     Ok(if sender_failed {
         1
     } else {
-        summary.exit_code() as u8
+        report::exit_code(&summary, prefill_incomplete)
     })
 }

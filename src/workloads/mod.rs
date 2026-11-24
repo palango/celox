@@ -55,6 +55,8 @@ pub struct Config {
     pub salt: u64,
     /// Writer contracts the `storage` workload spreads its writes over.
     pub contracts: u64,
+    /// Write the `storage` key range once instead of measuring (see `Storage`).
+    pub prefill: bool,
 }
 
 pub enum Workload {
@@ -77,17 +79,31 @@ impl Workload {
                     .ok_or_eyre("the cip64 workload needs a resolved fee currency")?,
                 config.recipient,
             )),
-            WorkloadKind::Storage => Self::Storage(
-                Storage::deploy(
-                    root,
-                    config.salt,
-                    config.contracts,
-                    config.writes,
-                    config.key_space,
-                )
-                .await?,
-            ),
+            WorkloadKind::Storage => Self::Storage(Storage::deploy(root, &config).await?),
         })
+    }
+
+    /// A representative transaction, for checking gas before funding. Unlike
+    /// `next` it never consumes a prefill chunk.
+    pub fn sample(&self, sender: Address) -> CeloTransactionRequest {
+        match self {
+            Self::Storage(workload) => workload.sample(),
+            _ => self.next(sender),
+        }
+    }
+
+    /// Whether the workload has nothing left to send: only a storage prefill
+    /// that has handed out its last chunk.
+    pub fn is_exhausted(&self) -> bool {
+        matches!(self, Self::Storage(workload) if workload.is_exhausted())
+    }
+
+    /// Chunks a storage prefill has not handed out, or `None` for any other run.
+    pub fn prefill_remaining(&self) -> Option<usize> {
+        match self {
+            Self::Storage(workload) => workload.prefill_remaining(),
+            _ => None,
+        }
     }
 
     /// Produces the next transaction for `sender`.

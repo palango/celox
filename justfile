@@ -86,6 +86,60 @@ e2e-storage:
     fi
     echo "OK: second run reused all 3 contracts; sum of slots[0] == $CONFIRMED confirmed transactions"
 
+# Storage prefill e2e: a cut-short prefill fails and leaves slots unwritten, a
+# re-run resumes and finishes by itself, a third run finds nothing pending, and
+# a chain without the CREATE2 deployer refuses --prefill before funding.
+e2e-storage-prefill:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    RPC=http://127.0.0.1:18551
+    BARE=http://127.0.0.1:18552
+    for PORT in 18551 18552; do
+        lsof -ti :$PORT >/dev/null 2>&1 && { echo "ERROR: port $PORT is already in use"; exit 1; }
+    done
+    anvil --port 18551 --block-time 1 > /tmp/celox-e2e-prefill-anvil.log 2>&1 &
+    ANVIL=$!
+    anvil --port 18552 --block-time 1 --disable-default-create2-deployer > /tmp/celox-e2e-prefill-bare-anvil.log 2>&1 &
+    BARE_ANVIL=$!
+    trap "kill $ANVIL $BARE_ANVIL 2>/dev/null || true" INT TERM EXIT
+    sleep 2
+    prefill() {
+        local rpc=$1; shift
+        NO_COLOR=1 CELOX_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
+            cargo run -q -- --rpc-url $rpc \
+            --workload storage --prefill --salt 7 --contracts 3 --key-space 50 --writes 5 \
+            --senders 5 "$@" 2>&1 | tee /dev/stderr
+    }
+    written() {
+        local count=0
+        for CONTRACT in $CONTRACTS; do
+            for K in $(seq 0 49); do
+                [[ $(( $(cast storage --rpc-url $RPC "$CONTRACT" "$(cast index uint256 $K 0)") )) -ne 0 ]] && count=$((count + 1))
+            done
+        done
+        echo $count
+    }
+    # (a) Cut short: exits non-zero with part of the 150 slots written.
+    if OUT=$(prefill $RPC --tps 5 --duration 1s); then echo "ERROR: a cut-short prefill exited 0"; exit 1; fi
+    CONTRACTS=$(echo "$OUT" | sed -n 's/.*state writer.*contract=\([0-9a-fA-Fx]*\).*/\1/p')
+    echo "$OUT" | grep -q "prefill: 30 of 30 chunks pending" || { echo "ERROR: (a) did not start with 30 pending chunks"; exit 1; }
+    A=$(written)
+    (( A > 0 && A < 150 )) || { echo "ERROR: (a) wrote $A of 150 slots"; exit 1; }
+    # (b) Resume: ends by itself, exits 0, every slot written.
+    OUT=$(prefill $RPC --tps 20) || { echo "ERROR: the resumed prefill failed"; exit 1; }
+    echo "$OUT" | grep -q "every pending chunk handed out" || { echo "ERROR: (b) did not stop on exhaustion"; exit 1; }
+    B=$(written)
+    [[ $B -eq 150 ]] || { echo "ERROR: (b) left $((150 - B)) of 150 slots unwritten"; exit 1; }
+    # (c) Nothing left: exits 0 without sending.
+    OUT=$(prefill $RPC --tps 20) || { echo "ERROR: the finished prefill's re-run failed"; exit 1; }
+    echo "$OUT" | grep -q "prefill: 0 of 30 chunks pending" || { echo "ERROR: (c) found chunks pending"; exit 1; }
+    echo "$OUT" | grep -q "spamming" && { echo "ERROR: (c) sent transactions"; exit 1; }
+    # (d) No CREATE2 deployer: refused before funding.
+    if OUT=$(prefill $BARE --tps 20); then echo "ERROR: --prefill ran without the CREATE2 deployer"; exit 1; fi
+    echo "$OUT" | grep -q "needs the CREATE2 deployer" || { echo "ERROR: (d) failed for another reason"; exit 1; }
+    echo "$OUT" | grep -qi "fund" && { echo "ERROR: (d) reached funding"; exit 1; }
+    echo "OK: cut-short prefill wrote $A/150 and failed; resume wrote 150/150 and stopped; re-run found 0 pending; no-deployer chain refused"
+
 # CIP-64 e2e against a celo-reth dev node (chain 1337, built from ../celo-kona).
 # Root = the dev account pre-funded with CELO and the 0x…ce16 fee currency.
 # `just e2e-cip64 fresh` runs --recipient fresh and also checks the recipients.

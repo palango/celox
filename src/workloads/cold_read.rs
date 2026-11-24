@@ -1,13 +1,12 @@
 use alloy_primitives::{Address, U256};
-use alloy_provider::DynProvider;
 use alloy_sol_types::{SolCall, sol};
-use celo_alloy_network::{Celo, TransactionBuilder};
+use celo_alloy_network::TransactionBuilder;
 use celo_alloy_rpc_types::CeloTransactionRequest;
 use eyre::{Result, bail, ensure};
 use tracing::info;
 
 use crate::{
-    deploy::{self, Origin},
+    deploy::{self, Origin, Root},
     gas,
     lane::RPC_TIMEOUT,
 };
@@ -45,17 +44,19 @@ impl ColdRead {
     /// Checks `token` answers `balanceOf`, then deploys, or reuses under
     /// `salt`, the prober contract.
     pub async fn new(
-        root: &DynProvider<Celo>,
+        root: &Root<'_>,
         salt: u64,
         reads: u64,
         token: Option<Address>,
     ) -> Result<Self> {
         if let Some(token) = token {
-            let answers = deploy::has_code(root, token).await?
+            let answers = deploy::has_code(root.provider, token).await?
                 && matches!(
                     tokio::time::timeout(
                         RPC_TIMEOUT,
-                        IBalanceOf::new(token, root).balanceOf(Address::ZERO).call(),
+                        IBalanceOf::new(token, root.provider)
+                            .balanceOf(Address::ZERO)
+                            .call(),
                     )
                     .await,
                     Ok(Ok(_))

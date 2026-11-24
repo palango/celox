@@ -196,6 +196,45 @@ e2e-cold-read mode="accounts":
     (( USED < LIMIT )) || { echo "ERROR: a probe used $USED gas against its $LIMIT limit"; exit 1; }
     echo "OK: {{mode}} probe of $READS reads used $USED gas (~$(( (USED - 21000) / READS )) per read incl. base) under its $LIMIT limit"
 
+# Deploys against a reth txpool, which caps pending transactions per account
+# (16): a celo-reth dev node whose genesis also carries the CREATE2 deployer,
+# deploying more storage contracts than that cap in one run, then reusing them.
+e2e-storage-reth:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    KONA="${KONA:-$(dirname "$(pwd)")/celo-kona}"
+    CELO_RETH="$KONA/target/debug/celo-reth"
+    [[ -x "$CELO_RETH" ]] || cargo build -p celo-reth --manifest-path "$KONA/Cargo.toml"
+    RPC=http://127.0.0.1:18556
+    lsof -ti :18556 >/dev/null 2>&1 && { echo "ERROR: port 18556 is already in use"; exit 1; }
+    DATADIR=$(mktemp -d)
+    GENESIS="$DATADIR/genesis.json"
+    jq '.alloc["4e59b44847b379578588920ca78fbf26c0b4956c"] = {"balance": "0x0", "code": "0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe03601600081602082378035828234f58015156039578182fd5b8082525050506014600cf3"}' \
+        "$KONA/e2e_test/celo-dev-genesis.json" > "$GENESIS"
+    LOG=/tmp/celox-e2e-storage-reth.log
+    "$CELO_RETH" init --chain "$GENESIS" --datadir "$DATADIR/db" > "$LOG" 2>&1
+    "$CELO_RETH" node --dev --dev.block-time 1s --chain "$GENESIS" --datadir "$DATADIR/db" \
+        --http --http.port 18556 --authrpc.port 18656 --disable-discovery >> "$LOG" 2>&1 &
+    NODE_PID=$!
+    trap 'kill $NODE_PID 2>/dev/null; wait $NODE_PID 2>/dev/null; rm -rf "$DATADIR"; true' INT TERM EXIT
+    for _ in $(seq 60); do
+        cast block-number --rpc-url $RPC &>/dev/null && break
+        sleep 0.5
+    done
+    run() {
+        NO_COLOR=1 CELOX_PRIVATE_KEY=0x2771aff413cac48d9f8c114fabddd9195a2129f3c2c436caa07e27bb7f58ead5 \
+            cargo run -q -- --rpc-url $RPC \
+            --workload storage --contracts 40 --writes 5 --key-space 5 --salt 3 \
+            --tps 10 --senders 5 --duration 5s 2>&1 | tee /dev/stderr
+    }
+    FIRST=$(run) || { echo "ERROR: deploying 40 contracts against a reth txpool failed"; exit 1; }
+    [[ $(echo "$FIRST" | grep -c "state writer deployed.*origin=deployed") -eq 40 ]] \
+        || { echo "ERROR: expected 40 CREATE2 deploys"; exit 1; }
+    SECOND=$(run) || { echo "ERROR: the reusing run failed"; exit 1; }
+    [[ $(echo "$SECOND" | grep -c "reusing state writer") -eq 40 ]] \
+        || { echo "ERROR: the second run did not reuse all 40 contracts"; exit 1; }
+    echo "OK: 40 CREATE2 deploys through a 16-slot reth txpool, all reused by the next run"
+
 # CIP-64 e2e against a celo-reth dev node (chain 1337, built from ../celo-kona).
 # Root = the dev account pre-funded with CELO and the 0x…ce16 fee currency.
 # `just e2e-cip64 fresh` runs --recipient fresh and also checks the recipients.

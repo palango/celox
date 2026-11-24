@@ -296,7 +296,11 @@ async fn run() -> Result<u8> {
                 reads: args.reads,
                 read_token: args.read_token,
             },
-            &provider,
+            &deploy::Root {
+                provider: &provider,
+                address: root_address,
+                fees: native_fees,
+            },
         )
         .await?,
     );

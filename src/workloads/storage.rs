@@ -12,7 +12,7 @@ use tracing::info;
 
 use super::Config;
 use crate::{
-    deploy::{self, CREATE2_DEPLOYER, Origin},
+    deploy::{self, CREATE2_DEPLOYER, Origin, Root},
     gas,
     lane::RPC_TIMEOUT,
 };
@@ -51,7 +51,7 @@ pub struct Storage {
 
 /// The chunks a prefill still has to write, handed out once each in order.
 struct Prefill {
-    /// (contract index, start) of each chunk whose last slot is still zero.
+    /// (contract index, start) of each chunk whose probe slot is still zero.
     pending: Vec<(usize, u64)>,
     cursor: AtomicUsize,
 }
@@ -86,7 +86,7 @@ impl Storage {
     /// Deploys, or reuses under `--salt`, the writer contracts the senders
     /// share. A prefill then finds the chunks still to write; a measured run
     /// reports whether its key range was prefilled.
-    pub async fn deploy(root: &DynProvider<Celo>, config: &Config) -> Result<Self> {
+    pub async fn deploy(root: &Root<'_>, config: &Config) -> Result<Self> {
         let Config {
             salt,
             contracts,
@@ -95,7 +95,7 @@ impl Storage {
             prefill,
             ..
         } = *config;
-        if prefill && !deploy::has_code(root, CREATE2_DEPLOYER).await? {
+        if prefill && !deploy::has_code(root.provider, CREATE2_DEPLOYER).await? {
             bail!(
                 "--prefill needs the CREATE2 deployer at {CREATE2_DEPLOYER}, which this chain \
                  lacks: without it no later run could find the prefilled contracts"
@@ -118,17 +118,17 @@ impl Storage {
             prefill: None,
         };
         if prefill {
-            let pending = storage.pending_chunks(root).await?;
+            let pending = storage.pending_chunks(root.provider).await?;
             let total = chunk_starts(key_space, writes).len() * storage.contracts.len();
             info!("prefill: {} of {total} chunks pending", pending.len());
             storage.prefill = Some(Prefill::new(pending));
         } else {
-            storage.report_sentinel(root).await?;
+            storage.report_sentinel(root.provider).await?;
         }
         Ok(storage)
     }
 
-    /// The (contract index, start) chunks whose last slot still reads zero.
+    /// The (contract index, start) chunks whose probe slot still reads zero.
     /// Chunks are ordered start-major, so consecutive transactions land on
     /// different contracts.
     async fn pending_chunks(&self, provider: &DynProvider<Celo>) -> Result<Vec<(usize, u64)>> {
@@ -137,7 +137,11 @@ impl Storage {
             .flat_map(|start| (0..self.contracts.len()).map(move |index| (index, start)))
             .collect();
         let written: Vec<bool> = stream::iter(chunks.iter().map(|&(index, start)| {
-            self.is_written(provider, self.contracts[index], start + self.writes - 1)
+            self.is_written(
+                provider,
+                self.contracts[index],
+                probe_slot(self.key_space, self.writes, start),
+            )
         }))
         .buffered(SCAN_CONCURRENCY)
         .try_collect()
@@ -238,6 +242,19 @@ fn chunk_starts(key_space: u64, writes: u64) -> Vec<u64> {
         .step_by(writes as usize)
         .map(|start| start.min(key_space - writes))
         .collect()
+}
+
+/// The slot whose value says whether the chunk at `start` was written: one no
+/// other chunk writes. Every chunk but the last starts below the clamped last
+/// chunk, so its first slot is its own; the last chunk owns the range's final
+/// slot. (A chunk's last slot would not do: the clamped last chunk overlaps the
+/// one before it whenever `writes` does not divide `key_space`.)
+fn probe_slot(key_space: u64, writes: u64, start: u64) -> u64 {
+    if start == key_space - writes {
+        key_space - 1
+    } else {
+        start
+    }
 }
 
 /// Storage key of `slots[slot]` in `StateWriter`, whose mapping sits at slot 0.
@@ -459,5 +476,27 @@ mod tests {
                 "ad3228b676f7d3cd4284a5443f17f1962b36e491b30a40b2405849e597ba5fb5"
             )
         );
+    }
+
+    /// A chunk counts as written when its probe slot is non-zero, so that slot
+    /// must belong to no other chunk: otherwise a lost chunk whose probe an
+    /// overlapping (clamped last) chunk wrote would never be resent.
+    #[test]
+    fn probe_slots_belong_to_one_chunk() {
+        for (key_space, writes) in [(12, 5), (52, 5), (50, 5), (5, 5), (100_000, 500), (7, 3)] {
+            let starts = chunk_starts(key_space, writes);
+            for &start in &starts {
+                let probe = probe_slot(key_space, writes, start);
+                let owners = starts
+                    .iter()
+                    .filter(|&&other| (other..other + writes).contains(&probe))
+                    .count();
+                assert_eq!(
+                    owners, 1,
+                    "probe {probe} of chunk {start} in ({key_space}, {writes})"
+                );
+                assert!((start..start + writes).contains(&probe));
+            }
+        }
     }
 }

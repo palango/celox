@@ -191,7 +191,7 @@ celox --workload storage --prefill --salt 42 --contracts 100 --key-space 100000 
 celox --workload storage --salt 42 --contracts 100 --key-space 100000 --writes 500 --tps 5
 ```
 
-The prefill is resumable: it first reads the last slot of every chunk and sends
+The prefill is resumable: it first reads one slot of every chunk, a slot no other chunk writes, and sends
 only the chunks still zero, so re-running the same command after an
 interruption, a dropped transaction or a `--duration` limit carries on where it
 stopped. It exits 0 only once every pending chunk was handed out and confirmed;
@@ -287,6 +287,7 @@ just test         # unit tests
 just e2e          # transfer workload against a throwaway anvil
 just e2e-storage  # storage with 3 contracts, run twice under one --salt; checks reuse and slot totals
 just e2e-storage-prefill  # cut-short prefill fails, re-run resumes and finishes, no-deployer chain refuses
+just e2e-storage-reth     # 40 CREATE2 deploys through a reth txpool's 16-per-account cap, then reuse
 just e2e-cold-read        # cold-read on anvil; checks a probe's gas against its preset limit
 just e2e-cold-read token  # same, probing the fee currency's balances on a celo-reth dev node
 just e2e-cip64    # CIP-64 against a celo-reth dev node from ../celo-kona
@@ -295,7 +296,7 @@ just build-contracts   # recompile Solidity and refresh the committed artifacts
 just docker-build      # build the container image
 ```
 
-`e2e-cip64` and `e2e-cold-read token` need a celo-kona checkout beside this one; anvil cannot serve
+`e2e-cip64`, `e2e-storage-reth` and `e2e-cold-read token` need a celo-kona checkout beside this one; anvil cannot serve
 type-0x7b transactions or the fee-currency RPCs.
 
 Design decisions and the running log live in `implementation-notes.md`.

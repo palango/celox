@@ -16,10 +16,20 @@ use alloy_sol_types::SolValue;
 use celo_alloy_network::{Celo, ReceiptResponse, TransactionBuilder};
 use celo_alloy_rpc_types::CeloTransactionRequest;
 use eyre::{Result, bail};
-use futures::future::join_all;
-use tracing::{debug, warn};
+use tracing::warn;
 
-use crate::lane::RPC_TIMEOUT;
+use crate::{
+    fees::FeeQuote,
+    gas,
+    lane::{Lane, MAX_WINDOW, RPC_TIMEOUT, Submitted},
+};
+
+/// The account that deploys workload contracts, and the fee it pays.
+pub struct Root<'a> {
+    pub provider: &'a DynProvider<Celo>,
+    pub address: Address,
+    pub fees: FeeQuote,
+}
 
 /// The standard deterministic deployer (Arachnid's): calldata is
 /// `salt ‖ init_code`, and it CREATE2s the contract.
@@ -74,19 +84,23 @@ pub async fn has_code(provider: &DynProvider<Celo>, address: Address) -> Result<
     Ok(!code.is_empty())
 }
 
-/// What a deploy attempt amounts to, given whether its transaction landed and
-/// whether code is at the address afterwards. A failed deploy with code present
-/// is a lost race against a concurrent run, which deployed the same contract.
-fn after_deploy(landed: bool, code_present: bool) -> Result<Origin> {
-    match (landed, code_present) {
+/// What a deploy attempt amounts to, given whether the node accepted its
+/// transaction and whether code is at the address once the window drained. A
+/// refused deploy with code present is a lost race against a concurrent run,
+/// which deployed the same contract.
+fn after_deploy(accepted: bool, code_present: bool) -> Result<Origin> {
+    match (accepted, code_present) {
         (true, true) => Ok(Origin::Deployed),
         (false, true) => Ok(Origin::Reused),
         (true, false) => bail!(
-            "the CREATE2 deployer accepted the deploy but left no code at the expected address"
+            "a deploy through the CREATE2 deployer left no code at the expected address \
+             (reverted, or no receipt within {}s)",
+            DEPLOY_RECEIPT_TIMEOUT.as_secs()
         ),
-        (false, false) => {
-            bail!("deploying a workload contract failed and nothing is at its address")
-        }
+        (false, false) => bail!(
+            "the node refused a workload contract deploy and nothing is at its address \
+             (the rejection is logged above)"
+        ),
     }
 }
 
@@ -94,14 +108,16 @@ fn after_deploy(landed: bool, code_present: bool) -> Result<Origin> {
 /// deploying the missing ones. On a chain without the CREATE2 deployer it falls
 /// back to plain CREATEs, whose addresses later runs cannot find again.
 ///
-/// Missing contracts are all submitted first and their receipts awaited
-/// together, so a hundred contracts cost about one block rather than a hundred.
+/// Deploys go through a root Lane: explicit nonces that advance only on an
+/// accepted submission, and at most `MAX_WINDOW` in flight, the per-account
+/// pending cap reth-based nodes enforce. A hundred contracts cost a few blocks.
 pub async fn ensure_all(
-    root: &DynProvider<Celo>,
+    root: &Root<'_>,
     salts: &[B256],
     init_code: &Bytes,
 ) -> Result<Vec<(Address, Origin)>> {
-    if !has_code(root, CREATE2_DEPLOYER).await? {
+    let provider = root.provider;
+    if !has_code(provider, CREATE2_DEPLOYER).await? {
         warn!(
             deployer = %CREATE2_DEPLOYER,
             "no CREATE2 deployer on this chain: deploying with plain CREATE, so later runs \
@@ -109,7 +125,10 @@ pub async fn ensure_all(
         );
         let mut deployed = Vec::with_capacity(salts.len());
         for _ in salts {
-            deployed.push((plain_create(root, init_code).await?, Origin::PlainCreate));
+            deployed.push((
+                plain_create(provider, init_code).await?,
+                Origin::PlainCreate,
+            ));
         }
         return Ok(deployed);
     }
@@ -119,45 +138,54 @@ pub async fn ensure_all(
         .collect();
     let mut present = Vec::with_capacity(addresses.len());
     for address in &addresses {
-        present.push(has_code(root, *address).await?);
+        present.push(has_code(provider, *address).await?);
     }
-
-    // Submit every missing deploy, then wait for all of them.
-    let mut pending = Vec::new();
-    for (index, salt) in salts.iter().enumerate() {
-        if present[index] {
-            continue;
-        }
-        let mut input = salt.to_vec();
-        input.extend_from_slice(init_code);
-        let request = CeloTransactionRequest::default()
-            .to(CREATE2_DEPLOYER)
-            .value(U256::ZERO)
-            .with_input(Bytes::from(input));
-        match tokio::time::timeout(RPC_TIMEOUT, root.send_transaction(request)).await {
-            Ok(Ok(sent)) => pending.push((index, Some(sent))),
-            Ok(Err(error)) => {
-                debug!(%error, address = %addresses[index], "deploy submission failed");
-                pending.push((index, None));
+    let missing: Vec<usize> = (0..addresses.len())
+        .filter(|index| !present[*index])
+        .collect();
+    let mut accepted = vec![false; addresses.len()];
+    if !missing.is_empty() {
+        let mut lane = Lane::open(
+            provider.clone(),
+            root.address,
+            MAX_WINDOW,
+            DEPLOY_RECEIPT_TIMEOUT,
+        )
+        .await?;
+        let mut queue = missing.iter().copied();
+        loop {
+            while lane.has_capacity() {
+                let Some(index) = queue.next() else { break };
+                let mut input = salts[index].to_vec();
+                input.extend_from_slice(init_code);
+                let request = CeloTransactionRequest::default()
+                    .to(CREATE2_DEPLOYER)
+                    .value(U256::ZERO)
+                    .gas_limit(gas::create2_deploy(&input, init_code.len()))
+                    .with_input(Bytes::from(input));
+                match lane.submit(request, root.fees).await {
+                    Submitted::Sent => accepted[index] = true,
+                    // The node refused it (or never answered): drain, then
+                    // resync, since a timed-out submission may have landed.
+                    Submitted::Rejected => {
+                        while lane.in_flight() > 0 {
+                            lane.next_completed().await;
+                        }
+                        lane.resync().await?;
+                    }
+                }
             }
-            Err(_elapsed) => pending.push((index, None)),
+            if lane.in_flight() == 0 {
+                break;
+            }
+            lane.next_completed().await;
         }
     }
-    let landed = join_all(pending.into_iter().map(|(index, sent)| async move {
-        let landed = match sent {
-            Some(sent) => matches!(
-                tokio::time::timeout(DEPLOY_RECEIPT_TIMEOUT, sent.get_receipt()).await,
-                Ok(Ok(receipt)) if receipt.status()
-            ),
-            None => false,
-        };
-        (index, landed)
-    }))
-    .await;
 
-    let mut origins: Vec<Origin> = vec![Origin::Reused; addresses.len()];
-    for (index, landed) in landed {
-        origins[index] = after_deploy(landed, has_code(root, addresses[index]).await?)?;
+    let mut origins = vec![Origin::Reused; addresses.len()];
+    for index in missing {
+        origins[index] =
+            after_deploy(accepted[index], has_code(provider, addresses[index]).await?)?;
     }
     Ok(addresses.into_iter().zip(origins).collect())
 }

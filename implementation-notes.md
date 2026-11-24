@@ -517,7 +517,7 @@ little about execution and state-root limits. Design and plan live in scion
   now rejected: it used to let writes run past the range.
 - **`storage --prefill`**: chunks of `--writes` slots, the last clamped to
   `key_space − writes`, ordered start-major so consecutive transactions hit
-  different contracts. Pending = last slot still zero, read 32 at a time with a
+  different contracts. Pending = probe slot still zero (the chunk's first slot, or the range's last for the clamped final chunk, so no two chunks share one), read 32 at a time with a
   timeout each. An atomic cursor hands chunks out; past the end it re-issues the
   last chunk, which only re-increments written slots. Main stops the senders
   once the cursor is exhausted (a 200ms poll beside `--duration` and Ctrl-C);

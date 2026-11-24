@@ -115,6 +115,21 @@ pub fn cold_token_reads(payload: &[u8], reads: u64) -> u64 {
     contract_call(payload, PROBE_BASE + reads * COLD_TOKEN_READ)
 }
 
+/// Upper bound on executing a deploy through the CREATE2 deployer: the CREATE
+/// itself (32_000), hashing and metering the init code (6 + 2 gas a word),
+/// copying it, and depositing the runtime code at 200 a byte, bounded by the
+/// init code's length since the runtime is part of it. The margin covers the
+/// deployer's own few opcodes and a constructor; the workload contracts have
+/// none.
+const CREATE2_MARGIN: u64 = 30_000;
+
+/// A deploy through the CREATE2 deployer carrying `salt ‖ init_code`.
+pub fn create2_deploy(payload: &[u8], init_code_len: usize) -> u64 {
+    let len = init_code_len as u64;
+    let words = len.div_ceil(32);
+    contract_call(payload, 32_000 + 11 * words + 200 * len + CREATE2_MARGIN)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

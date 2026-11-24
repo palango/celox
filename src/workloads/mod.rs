@@ -19,8 +19,6 @@ pub mod storage;
 pub(crate) mod transfer;
 
 use alloy_primitives::Address;
-use alloy_provider::DynProvider;
-use celo_alloy_network::Celo;
 use celo_alloy_rpc_types::CeloTransactionRequest;
 use eyre::{OptionExt, Result};
 
@@ -30,7 +28,7 @@ pub use cold_read::ColdRead;
 pub use storage::Storage;
 pub use transfer::{Recipient, Transfer};
 
-use crate::celo::FeeCurrency;
+use crate::{celo::FeeCurrency, deploy::Root};
 
 #[derive(Clone, Copy, Debug, PartialEq, clap::ValueEnum)]
 pub enum WorkloadKind {
@@ -80,7 +78,7 @@ pub enum Workload {
 impl Workload {
     /// Builds the workload, running any on-chain preparation it needs (a
     /// contract deploy) with the root account.
-    pub async fn new(kind: WorkloadKind, config: Config, root: &DynProvider<Celo>) -> Result<Self> {
+    pub async fn new(kind: WorkloadKind, config: Config, root: &Root<'_>) -> Result<Self> {
         Ok(match kind {
             WorkloadKind::Transfer => Self::Transfer(Transfer::new(config.recipient)),
             WorkloadKind::Calldata => Self::Calldata(Calldata::new(config.data_size)),

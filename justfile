@@ -55,20 +55,31 @@ e2e-storage:
     anvil --port 18549 --block-time 1 > /tmp/celox-e2e-storage-anvil.log 2>&1 &
     trap "kill $! 2>/dev/null || true" INT TERM EXIT
     sleep 2
-    OUT=$(NO_COLOR=1 CELOX_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
-        cargo run -q -- --rpc-url $RPC \
-        --workload storage --writes 5 --key-space 1 \
-        --tps 20 --senders 10 --duration 10s 2>&1 | tee /dev/stderr)
-    CONTRACT=$(echo "$OUT" | sed -n 's/.*state writer deployed.*contract=\([0-9a-fA-Fx]*\).*/\1/p')
-    CONFIRMED=$(echo "$OUT" | sed -n 's/.*run finished.*confirmed=\([0-9]*\).*/\1/p')
-    # slots[0] is bumped once per transaction, so it must equal the confirmed count.
+    run() {
+        NO_COLOR=1 CELOX_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
+            cargo run -q -- --rpc-url $RPC \
+            --workload storage --writes 5 --key-space 1 --salt 42 \
+            --tps 20 --senders 10 --duration 10s 2>&1 | tee /dev/stderr
+    }
+    contract_of() { sed -n 's/.*state writer.*contract=\([0-9a-fA-Fx]*\).*/\1/p'; }
+    confirmed_of() { sed -n 's/.*run finished.*confirmed=\([0-9]*\).*/\1/p'; }
+    FIRST=$(run)
+    SECOND=$(run)
+    CONTRACT=$(echo "$FIRST" | contract_of)
+    # The same --salt must land the second run on the first run's contract.
+    if ! echo "$SECOND" | grep -q "reusing state writer" || [[ "$(echo "$SECOND" | contract_of)" != "$CONTRACT" ]]; then
+        echo "ERROR: the second run with --salt 42 did not reuse $CONTRACT"
+        exit 1
+    fi
+    CONFIRMED=$(( $(echo "$FIRST" | confirmed_of) + $(echo "$SECOND" | confirmed_of) ))
+    # slots[0] is bumped once per transaction, across both runs.
     SLOT=$(cast index uint256 0 0)
     VALUE=$(cast storage --rpc-url $RPC "$CONTRACT" "$SLOT")
     if [[ $((VALUE)) -ne $CONFIRMED ]]; then
         echo "ERROR: slots[0] is $((VALUE)) after $CONFIRMED confirmed transactions"
         exit 1
     fi
-    echo "OK: slots[0] == $CONFIRMED confirmed transactions (state writes landed)"
+    echo "OK: second run reused $CONTRACT; slots[0] == $CONFIRMED confirmed transactions"
 
 # CIP-64 e2e against a celo-reth dev node (chain 1337, built from ../celo-kona).
 # Root = the dev account pre-funded with CELO and the 0x…ce16 fee currency.

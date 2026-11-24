@@ -51,6 +51,8 @@ pub struct Config {
     pub fee_currency: Option<FeeCurrency>,
     pub writes: u64,
     pub key_space: u64,
+    /// Namespaces workload contracts' CREATE2 addresses (see `deploy`).
+    pub salt: u64,
 }
 
 pub enum Workload {
@@ -73,9 +75,9 @@ impl Workload {
                     .ok_or_eyre("the cip64 workload needs a resolved fee currency")?,
                 config.recipient,
             )),
-            WorkloadKind::Storage => {
-                Self::Storage(Storage::deploy(root, config.writes, config.key_space).await?)
-            }
+            WorkloadKind::Storage => Self::Storage(
+                Storage::deploy(root, config.salt, config.writes, config.key_space).await?,
+            ),
         })
     }
 

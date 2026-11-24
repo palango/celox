@@ -1,4 +1,5 @@
 mod celo;
+mod deploy;
 mod fees;
 mod funder;
 mod gas;
@@ -65,6 +66,11 @@ struct Args {
     /// state trie; a narrow one contends on hot slots.
     #[arg(long, default_value_t = 1_000_000)]
     key_space: u64,
+
+    /// Share workload contracts across runs: the same salt deploys to, and
+    /// reuses, the same addresses. Default: random, so each run gets fresh ones
+    #[arg(long)]
+    salt: Option<u64>,
 
     /// Target transactions per second across all senders
     #[arg(long, default_value_t = 10.0)]
@@ -231,6 +237,11 @@ async fn run() -> Result<u8> {
         }),
         None => None,
     };
+    let salt = args.salt.unwrap_or_else(rand::random);
+    info!(
+        salt,
+        "workload contract salt (pass --salt to reuse this run's contracts)"
+    );
     // Any contract the workload needs is deployed before funding, so the root
     // still holds the deploy cost when the solvency check runs — funding stays
     // all or nothing.
@@ -243,6 +254,7 @@ async fn run() -> Result<u8> {
                 fee_currency,
                 writes: args.writes,
                 key_space: args.key_space,
+                salt,
             },
             &provider,
         )

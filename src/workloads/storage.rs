@@ -7,7 +7,10 @@ use eyre::Result;
 use rand::RngExt;
 use tracing::info;
 
-use crate::gas;
+use crate::{
+    deploy::{self, Origin},
+    gas,
+};
 
 sol! {
     #[sol(rpc)]
@@ -29,10 +32,20 @@ pub struct Storage {
 }
 
 impl Storage {
-    /// Deploys the contract every sender will write to.
-    pub async fn deploy(root: &DynProvider<Celo>, writes: u64, key_space: u64) -> Result<Self> {
-        let contract = *StateWriter::deploy(root).await?.address();
-        info!(%contract, writes, key_space, "state writer deployed");
+    /// Deploys, or reuses under `salt`, the contract every sender will write to.
+    pub async fn deploy(
+        root: &DynProvider<Celo>,
+        salt: u64,
+        writes: u64,
+        key_space: u64,
+    ) -> Result<Self> {
+        let deployed =
+            deploy::ensure_all(root, &[deploy::salt(salt, 0)], &StateWriter::BYTECODE).await?;
+        let (contract, origin) = deployed[0];
+        match origin {
+            Origin::Reused => info!(%contract, writes, key_space, "reusing state writer"),
+            _ => info!(%contract, %origin, writes, key_space, "state writer deployed"),
+        }
         Ok(Self {
             contract,
             writes,

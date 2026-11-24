@@ -17,12 +17,13 @@ build-contracts:
     (cd contracts && forge build)
     python3 - <<'PY'
     import json
-    artifact = json.load(open("contracts/out/StateWriter.sol/StateWriter.json"))
-    json.dump(
-        {"abi": artifact["abi"], "bytecode": {"object": artifact["bytecode"]["object"]}},
-        open("contracts/StateWriter.json", "w"),
-        indent=2,
-    )
+    for name in ["StateWriter", "StateProber"]:
+        artifact = json.load(open(f"contracts/out/{name}.sol/{name}.json"))
+        json.dump(
+            {"abi": artifact["abi"], "bytecode": {"object": artifact["bytecode"]["object"]}},
+            open(f"contracts/{name}.json", "w"),
+            indent=2,
+        )
     PY
 
 test:
@@ -139,6 +140,61 @@ e2e-storage-prefill:
     echo "$OUT" | grep -q "needs the CREATE2 deployer" || { echo "ERROR: (d) failed for another reason"; exit 1; }
     echo "$OUT" | grep -qi "fund" && { echo "ERROR: (d) reached funding"; exit 1; }
     echo "OK: cut-short prefill wrote $A/150 and failed; resume wrote 150/150 and stopped; re-run found 0 pending; no-deployer chain refused"
+
+# Cold-read e2e: `just e2e-cold-read` probes native balances on anvil;
+# `just e2e-cold-read token` probes the fee currency's balances on the celo-reth
+# dev node (see e2e-cip64). Every probe must confirm under its preset gas limit,
+# and the measured gas per read is printed for the bounds in src/gas.rs.
+e2e-cold-read mode="accounts":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    READS=200
+    if [[ "{{mode}}" == token ]]; then
+        KONA="${KONA:-$(dirname "$(pwd)")/celo-kona}"
+        CELO_RETH="$KONA/target/debug/celo-reth"
+        [[ -x "$CELO_RETH" ]] || cargo build -p celo-reth --manifest-path "$KONA/Cargo.toml"
+        GENESIS="$KONA/e2e_test/celo-dev-genesis.json"
+        RPC=http://127.0.0.1:18548
+        KEY=0x2771aff413cac48d9f8c114fabddd9195a2129f3c2c436caa07e27bb7f58ead5
+        EXTRA=(--read-token 0x000000000000000000000000000000000000ce16)
+        lsof -ti :18548 >/dev/null 2>&1 && { echo "ERROR: port 18548 is already in use"; exit 1; }
+        DATADIR=$(mktemp -d)
+        LOG=/tmp/celox-e2e-cold-read-celo-reth.log
+        "$CELO_RETH" init --chain "$GENESIS" --datadir "$DATADIR" > "$LOG" 2>&1
+        "$CELO_RETH" node --dev --dev.block-time 1s --chain "$GENESIS" --datadir "$DATADIR" \
+            --http --http.port 18548 --authrpc.port 18648 --disable-discovery >> "$LOG" 2>&1 &
+        NODE_PID=$!
+        trap 'kill $NODE_PID 2>/dev/null; wait $NODE_PID 2>/dev/null; rm -rf "$DATADIR"; true' INT TERM EXIT
+    else
+        RPC=http://127.0.0.1:18553
+        KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
+        EXTRA=()
+        lsof -ti :18553 >/dev/null 2>&1 && { echo "ERROR: port 18553 is already in use"; exit 1; }
+        anvil --port 18553 --block-time 1 > /tmp/celox-e2e-cold-read-anvil.log 2>&1 &
+        NODE_PID=$!
+        trap "kill $NODE_PID 2>/dev/null || true" INT TERM EXIT
+    fi
+    for _ in $(seq 60); do
+        cast block-number --rpc-url $RPC &>/dev/null && break
+        sleep 0.5
+    done
+    OUT=$(NO_COLOR=1 CELOX_PRIVATE_KEY=$KEY cargo run -q -- --rpc-url $RPC \
+        --workload cold-read --reads $READS "${EXTRA[@]}" \
+        --tps 10 --senders 10 --duration 10s 2>&1 | tee /dev/stderr)
+    echo "$OUT" | grep -q "run finished.*reverted=0" || { echo "ERROR: a probe reverted"; exit 1; }
+    PROBER=$(echo "$OUT" | sed -n 's/.*state prober.*prober=\(0x[0-9a-fA-F]*\).*/\1/p' | tr A-F a-f)
+    # One confirmed probe: its preset limit and the gas it actually used.
+    HEAD=$(cast block-number --rpc-url $RPC)
+    for B in $(seq $HEAD -1 $((HEAD - 20))); do
+        TX=$(cast block $B --full --json --rpc-url $RPC \
+            | jq -c --arg p "$PROBER" '[.transactions[] | select((.to // "" | ascii_downcase) == $p)][0] // empty')
+        [[ -n "$TX" ]] && break
+    done
+    [[ -n "${TX:-}" ]] || { echo "ERROR: no probe transaction in the last 20 blocks"; exit 1; }
+    LIMIT=$(( $(echo "$TX" | jq -r .gas) ))
+    USED=$(( $(cast receipt --rpc-url $RPC $(echo "$TX" | jq -r .hash) gasUsed) ))
+    (( USED < LIMIT )) || { echo "ERROR: a probe used $USED gas against its $LIMIT limit"; exit 1; }
+    echo "OK: {{mode}} probe of $READS reads used $USED gas (~$(( (USED - 21000) / READS )) per read incl. base) under its $LIMIT limit"
 
 # CIP-64 e2e against a celo-reth dev node (chain 1337, built from ../celo-kona).
 # Root = the dev account pre-funded with CELO and the 0x…ce16 fee currency.

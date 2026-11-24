@@ -78,6 +78,15 @@ struct Args {
     #[arg(long)]
     prefill: bool,
 
+    /// State reads per transaction, for the `cold-read` workload
+    #[arg(long, default_value_t = 100)]
+    reads: u64,
+
+    /// ERC-20 whose balances the `cold-read` workload probes (for example
+    /// cUSD); without it, native account balances
+    #[arg(long)]
+    read_token: Option<Address>,
+
     /// Share workload contracts across runs: the same salt deploys to, and
     /// reuses, the same addresses. Default: random, so each run gets fresh ones
     #[arg(long)]
@@ -188,6 +197,11 @@ async fn run() -> Result<u8> {
         args.prefill,
         args.salt,
     )?;
+    workloads::cold_read::check(args.reads)?;
+    ensure!(
+        args.read_token.is_none() || args.workload == WorkloadKind::ColdRead,
+        "--read-token only applies to the cold-read workload"
+    );
     ensure!(
         !args.prefill || args.workload == WorkloadKind::Storage,
         "--prefill only applies to the storage workload"
@@ -279,6 +293,8 @@ async fn run() -> Result<u8> {
                 salt,
                 contracts: args.contracts,
                 prefill: args.prefill,
+                reads: args.reads,
+                read_token: args.read_token,
             },
             &provider,
         )

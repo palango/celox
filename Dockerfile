@@ -21,8 +21,8 @@ RUN mkdir src \
     && rm -rf src
 
 COPY src ./src
-# The sol! macro reads this at compile time, relative to the manifest.
-COPY contracts/StateWriter.json ./contracts/StateWriter.json
+# The sol! macro reads these at compile time, relative to the manifest.
+COPY contracts/*.json ./contracts/
 # Discard the stub's artifacts before rebuilding. COPY preserves the build
 # context's mtimes, so a checkout older than the stub build leaves cargo
 # believing target/release/celox is already up to date: it skips the rebuild

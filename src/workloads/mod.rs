@@ -14,6 +14,7 @@
 
 mod calldata;
 mod cip64;
+pub mod cold_read;
 pub mod storage;
 pub(crate) mod transfer;
 
@@ -25,6 +26,7 @@ use eyre::{OptionExt, Result};
 
 pub use calldata::Calldata;
 pub use cip64::Cip64;
+pub use cold_read::ColdRead;
 pub use storage::Storage;
 pub use transfer::{Recipient, Transfer};
 
@@ -39,8 +41,12 @@ pub enum WorkloadKind {
     /// Gas paid in a fee currency (CIP-64); --recipient picks a 1-wei native
     /// self-transfer or a 1-wei transfer of the fee currency to a fresh address
     Cip64,
-    /// Storage writes against one shared contract
+    /// Storage writes across --contracts writer contracts; --prefill fills
+    /// their key range once for later runs to update
     Storage,
+    /// Reads of random, never-repeated keys: native balances, or
+    /// --read-token balances, --reads per transaction
+    ColdRead,
 }
 
 /// Workload settings from the CLI. Each workload reads only the fields it needs.
@@ -57,6 +63,10 @@ pub struct Config {
     pub contracts: u64,
     /// Write the `storage` key range once instead of measuring (see `Storage`).
     pub prefill: bool,
+    /// State reads per `cold-read` transaction.
+    pub reads: u64,
+    /// ERC-20 whose balances `cold-read` probes, instead of native balances.
+    pub read_token: Option<Address>,
 }
 
 pub enum Workload {
@@ -64,6 +74,7 @@ pub enum Workload {
     Calldata(Calldata),
     Cip64(Cip64),
     Storage(Storage),
+    ColdRead(ColdRead),
 }
 
 impl Workload {
@@ -80,6 +91,9 @@ impl Workload {
                 config.recipient,
             )),
             WorkloadKind::Storage => Self::Storage(Storage::deploy(root, &config).await?),
+            WorkloadKind::ColdRead => Self::ColdRead(
+                ColdRead::new(root, config.salt, config.reads, config.read_token).await?,
+            ),
         })
     }
 
@@ -113,6 +127,7 @@ impl Workload {
             Self::Calldata(workload) => workload.next(sender),
             Self::Cip64(workload) => workload.next(sender),
             Self::Storage(workload) => workload.next(sender),
+            Self::ColdRead(workload) => workload.next(sender),
         }
     }
 }

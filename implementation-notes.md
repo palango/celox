@@ -497,3 +497,39 @@ considering if our 6% over-provisioning or block-packing fidelity ever matters.
 - Verified: `just` clean, 44/44 unit tests; `just e2e` 220/220,
   `just e2e-storage` 219/219 with the slot check, `just e2e-cip64` 110/110,
   `just e2e-cip64 fresh` 110/110 with 110 fresh recipients at 1 wei.
+
+### State-heavy and cold-read load (2026-11-24, for scion scale tests)
+
+Why: scion's scale1 fork measured mainnet traffic at ~41 changed state entries
+per million gas, against ~1.9 for celox's calldata load, so calldata runs said
+little about execution and state-root limits. Design and plan live in scion
+(`docs/superpowers/specs|plans/2026-11-24-state-heavy-load*`).
+
+- **CREATE2 deploys (`src/deploy.rs`).** Salt `keccak256(abi.encode(base,
+  index))`, base from `--salt` (random by default, logged). Present code is
+  reused. Missing contracts are submitted together and their receipts awaited
+  together (not through the root Lane: it needs a fee quote, and the refresher
+  starts after deploys). A failed deploy with code at the address afterwards is
+  a lost race with a concurrent run and counts as reuse. No deployer: plain
+  CREATE, with a warning.
+- **`storage --contracts N`** (1–1000): random contract and start per
+  transaction, start in `0..=key_space − writes`. `--writes > --key-space` is
+  now rejected: it used to let writes run past the range.
+- **`storage --prefill`**: chunks of `--writes` slots, the last clamped to
+  `key_space − writes`, ordered start-major so consecutive transactions hit
+  different contracts. Pending = last slot still zero, read 32 at a time with a
+  timeout each. An atomic cursor hands chunks out; past the end it re-issues the
+  last chunk, which only re-increments written slots. Main stops the senders
+  once the cursor is exhausted (a 200ms poll beside `--duration` and Ctrl-C);
+  in prefill mode the exit code also fails when chunks remain. Main's
+  pre-funding gas probe uses `Workload::sample`, because `next` would consume a
+  chunk without sending it.
+- **`cold-read`**: `StateProber.probeAccounts(seed, n)` (BALANCE) and
+  `probeToken(token, seed, n)` (`balanceOf`), seed a random u64 per
+  transaction. Gas bounds, measured at 200 reads: accounts ~2,910/read on anvil
+  and ~2,934 on mainnet state (scale1 op-reth, `eth_estimateGas` with the
+  prober as a state override); token ~3,300 on the dev fee currency and ~4,336
+  on cUSD. Bounds are the larger plus 25%: 3,700 and 5,500 per read, plus a
+  30,000 fixed bound per call.
+- The Dockerfile copies `contracts/*.json`, so the image gets every artifact.
+

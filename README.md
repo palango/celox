@@ -139,11 +139,14 @@ be transferred, so celox cannot fund senders with them.
 Other Celo Sepolia currencies: cEUR `0x6B172e333e2978484261D7eCC3DE491E79764BbC`,
 cREAL `0x13d68A1Bf4a8cB7d9feF54EF70401871b666269c`.
 
-### `storage` — state growth and contention
+### `storage` — state growth, contention and spread
 
-Deploys `contracts/src/StateWriter.sol` and has every sender call it, so the load
-converges on one contract's storage trie. `--writes` sets how many slots each
-transaction touches; `--key-space` decides what kind of pressure that is.
+Deploys `contracts/src/StateWriter.sol` and has every sender call it. `--writes`
+sets how many consecutive slots each transaction bumps, inside a key range of
+`--key-space` slots (`--writes` may not exceed it); `--key-space` decides what
+kind of pressure that is. `--contracts N` spreads the writes over N writer
+contracts, picked at random per transaction, so each block touches N storage
+tries and account-trie paths instead of one — the spread real traffic has.
 
 ```sh
 # State growth: writes land on fresh slots and the trie keeps growing
@@ -151,13 +154,78 @@ celox --workload storage --writes 10 --key-space 100000000 --tps 50 --senders 20
 
 # Contention: every sender rewrites the same handful of hot slots
 celox --workload storage --writes 10 --key-space 16 --tps 50 --senders 20
+
+# Spread: 100 contracts, mainnet-like scatter of state changes per block
+celox --workload storage --contracts 100 --writes 50 --key-space 100000 --tps 50 --senders 20
 ```
 
 A fresh slot costs about 22,100 gas and a rewritten one about 5,000, so the two
 modes differ in cost as well as in what they stress: the first grows state and
 the work of computing a state root, the second concentrates writes where
-execution must serialise them. Gas is preset as an upper bound for the fresh
-case, which over-provisions by a few percent once a key range has filled.
+execution must serialise them. Gas is preset at 23,000 per write, an upper bound
+for the fresh case; once a key range is filled that reserves about 4.6 times
+what a write uses. The difference is refunded, but nodes reserve `gas_limit ×
+max_fee` for every pending transaction, so `--fund` must cover the bound, not
+the use.
+
+**Reusing contracts across runs.** Workload contracts are deployed through the
+standard CREATE2 deployer (`0x4e59…956c`), so their addresses depend only on
+`--salt` and the contract's bytecode. Without `--salt` a run picks a random one
+and gets fresh contracts, as before; it logs the salt so the run can be
+repeated. With the same `--salt`, a run finds the earlier contracts and reuses
+them (`reusing state writer`), state included. A chain without the deployer
+falls back to plain deploys, whose addresses do not repeat.
+
+**Prefilling.** Updates of existing slots in a large trie are the realistic
+worst case for state-root work, and a freshly written trie reproduces nothing.
+`--prefill` writes every slot of the key range once, in `--writes`-slot chunks,
+then stops by itself:
+
+```sh
+# ~10M slots: 100 contracts x 100,000 slots, about 220B gas. Each transaction
+# writes 500 fresh slots (~11M gas), so 2 tps is ~22M gas/s: under a 33M target,
+# the base fee stays at its floor and the prefill takes about 3 hours
+celox --workload storage --prefill --salt 42 --contracts 100 --key-space 100000 --writes 500 \
+    --tps 2 --senders 20
+# Then measure against the filled range with the same salt and range
+celox --workload storage --salt 42 --contracts 100 --key-space 100000 --writes 500 --tps 5
+```
+
+The prefill is resumable: it first reads the last slot of every chunk and sends
+only the chunks still zero, so re-running the same command after an
+interruption, a dropped transaction or a `--duration` limit carries on where it
+stopped. It exits 0 only once every pending chunk was handed out and confirmed;
+otherwise it exits 1 and logs how many chunks remain. It needs `--salt` (the
+measured runs must find its contracts) and the CREATE2 deployer, and refuses to
+start without them. A measured run logs whether its key range looks prefilled,
+from the range's last slot.
+
+### `cold-read` — database lookups the node cannot cache
+
+Deploys `contracts/src/StateProber.sol`. Each transaction passes a fresh random
+seed and reads state at `--reads` addresses derived from it, so no key repeats
+and every lookup misses the node's caches and goes to its database:
+
+```sh
+# Cold account reads: BALANCE of random addresses
+celox --workload cold-read --reads 1000 --tps 20 --senders 20
+
+# Cold storage reads in one big contract: cUSD balances of random holders
+celox --workload cold-read --reads 1000 --read-token 0x765DE816845861e75A25fCA122bb6898B8B1282a \
+    --tps 20 --senders 20
+```
+
+`--read-token` must be an ERC-20 the chain can call; celox checks it answers
+`balanceOf` before funding. Gas per read is preset from measurements: about
+2,930 for an account and 4,340 for a cUSD balance on mainnet state (see
+`src/gas.rs`). The reads only cost the node anything if its database is larger
+than its memory, as on a mainnet fork; on a fresh dev chain they hit empty
+state.
+
+Every workload that deploys a contract (`storage`, `cold-read`) takes `--salt`.
+To run several celox instances against one chain at once, give each its own
+root key: senders derive from the root by index, so two instances on one root
+would share accounts and collide on nonces.
 
 ## How it works
 
@@ -217,14 +285,17 @@ per interval — so raise it when measuring a node whose read path you care abou
 just              # format, then clippy with warnings denied
 just test         # unit tests
 just e2e          # transfer workload against a throwaway anvil
-just e2e-storage  # storage workload; asserts the contract's slot equals the confirmed count
+just e2e-storage  # storage with 3 contracts, run twice under one --salt; checks reuse and slot totals
+just e2e-storage-prefill  # cut-short prefill fails, re-run resumes and finishes, no-deployer chain refuses
+just e2e-cold-read        # cold-read on anvil; checks a probe's gas against its preset limit
+just e2e-cold-read token  # same, probing the fee currency's balances on a celo-reth dev node
 just e2e-cip64    # CIP-64 against a celo-reth dev node from ../celo-kona
 just e2e-cip64 fresh   # same with --recipient fresh; checks every recipient got 1 wei
 just build-contracts   # recompile Solidity and refresh the committed artifacts
 just docker-build      # build the container image
 ```
 
-`e2e-cip64` needs a celo-kona checkout beside this one; anvil cannot serve
+`e2e-cip64` and `e2e-cold-read token` need a celo-kona checkout beside this one; anvil cannot serve
 type-0x7b transactions or the fee-currency RPCs.
 
 Design decisions and the running log live in `implementation-notes.md`.

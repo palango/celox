@@ -58,28 +58,33 @@ e2e-storage:
     run() {
         NO_COLOR=1 CELOX_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
             cargo run -q -- --rpc-url $RPC \
-            --workload storage --writes 5 --key-space 1 --salt 42 \
+            --workload storage --contracts 3 --writes 5 --key-space 5 --salt 42 \
             --tps 20 --senders 10 --duration 10s 2>&1 | tee /dev/stderr
     }
-    contract_of() { sed -n 's/.*state writer.*contract=\([0-9a-fA-Fx]*\).*/\1/p'; }
+    contracts_of() { sed -n 's/.*state writer.*contract=\([0-9a-fA-Fx]*\).*/\1/p' | sort; }
     confirmed_of() { sed -n 's/.*run finished.*confirmed=\([0-9]*\).*/\1/p'; }
     FIRST=$(run)
     SECOND=$(run)
-    CONTRACT=$(echo "$FIRST" | contract_of)
-    # The same --salt must land the second run on the first run's contract.
-    if ! echo "$SECOND" | grep -q "reusing state writer" || [[ "$(echo "$SECOND" | contract_of)" != "$CONTRACT" ]]; then
-        echo "ERROR: the second run with --salt 42 did not reuse $CONTRACT"
+    CONTRACTS=$(echo "$FIRST" | contracts_of)
+    [[ $(echo "$CONTRACTS" | wc -l) -eq 3 ]] || { echo "ERROR: expected 3 writer contracts, got: $CONTRACTS"; exit 1; }
+    # The same --salt must land the second run on the first run's contracts.
+    if [[ $(echo "$SECOND" | grep -c "reusing state writer") -ne 3 || "$(echo "$SECOND" | contracts_of)" != "$CONTRACTS" ]]; then
+        echo "ERROR: the second run with --salt 42 did not reuse all of: $CONTRACTS"
         exit 1
     fi
     CONFIRMED=$(( $(echo "$FIRST" | confirmed_of) + $(echo "$SECOND" | confirmed_of) ))
-    # slots[0] is bumped once per transaction, across both runs.
+    # With writes == key-space every transaction bumps slots[0..5) of one
+    # contract, so slots[0] summed over the contracts counts every transaction.
     SLOT=$(cast index uint256 0 0)
-    VALUE=$(cast storage --rpc-url $RPC "$CONTRACT" "$SLOT")
-    if [[ $((VALUE)) -ne $CONFIRMED ]]; then
-        echo "ERROR: slots[0] is $((VALUE)) after $CONFIRMED confirmed transactions"
+    TOTAL=0
+    for CONTRACT in $CONTRACTS; do
+        TOTAL=$(( TOTAL + $(cast storage --rpc-url $RPC "$CONTRACT" "$SLOT") ))
+    done
+    if [[ $TOTAL -ne $CONFIRMED ]]; then
+        echo "ERROR: slots[0] sums to $TOTAL over the contracts after $CONFIRMED confirmed transactions"
         exit 1
     fi
-    echo "OK: second run reused $CONTRACT; slots[0] == $CONFIRMED confirmed transactions"
+    echo "OK: second run reused all 3 contracts; sum of slots[0] == $CONFIRMED confirmed transactions"
 
 # CIP-64 e2e against a celo-reth dev node (chain 1337, built from ../celo-kona).
 # Root = the dev account pre-funded with CELO and the 0x…ce16 fee currency.

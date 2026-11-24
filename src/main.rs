@@ -67,6 +67,11 @@ struct Args {
     #[arg(long, default_value_t = 1_000_000)]
     key_space: u64,
 
+    /// Writer contracts the `storage` workload spreads its writes over; each
+    /// transaction picks one at random
+    #[arg(long, default_value_t = 1)]
+    contracts: u64,
+
     /// Share workload contracts across runs: the same salt deploys to, and
     /// reuses, the same addresses. Default: random, so each run gets fresh ones
     #[arg(long)]
@@ -170,6 +175,7 @@ async fn run() -> Result<u8> {
         "--writes must be between 1 and 10000"
     );
     ensure!(args.key_space > 0, "--key-space must be at least 1");
+    workloads::storage::check(args.writes, args.key_space, args.contracts)?;
     ensure!(
         args.workload == WorkloadKind::Cip64 || args.fee_currency.is_none(),
         "--fee-currency only applies to the cip64 workload"
@@ -255,6 +261,7 @@ async fn run() -> Result<u8> {
                 writes: args.writes,
                 key_space: args.key_space,
                 salt,
+                contracts: args.contracts,
             },
             &provider,
         )

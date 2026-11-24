@@ -14,7 +14,7 @@
 
 mod calldata;
 mod cip64;
-mod storage;
+pub mod storage;
 pub(crate) mod transfer;
 
 use alloy_primitives::Address;
@@ -53,6 +53,8 @@ pub struct Config {
     pub key_space: u64,
     /// Namespaces workload contracts' CREATE2 addresses (see `deploy`).
     pub salt: u64,
+    /// Writer contracts the `storage` workload spreads its writes over.
+    pub contracts: u64,
 }
 
 pub enum Workload {
@@ -76,7 +78,14 @@ impl Workload {
                 config.recipient,
             )),
             WorkloadKind::Storage => Self::Storage(
-                Storage::deploy(root, config.salt, config.writes, config.key_space).await?,
+                Storage::deploy(
+                    root,
+                    config.salt,
+                    config.contracts,
+                    config.writes,
+                    config.key_space,
+                )
+                .await?,
             ),
         })
     }
